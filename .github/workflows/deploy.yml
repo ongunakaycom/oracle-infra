@@ -1,0 +1,31 @@
+name: Deploy to Oracle Cloud
+
+on:
+  push:
+    branches: [ "main", "master" ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Deploy to Server via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            sudo mkdir -p /var/www/html
+            sudo tee /var/www/html/index.html << 'EOF'
+            $(cat index.html)
+            EOF
+            sudo chown -R $USER:$USER /var/www/html
+            # Eğer Nginx kurulu değilse kuralım ve başlatalım
+            if ! command -v nginx &> /dev/null; then
+                sudo dnf install -y nginx || sudo apt update && sudo apt install -y nginx
+            fi
+            sudo systemctl enable nginx
+            sudo systemctl restart nginx
