@@ -1,4 +1,0 @@
-
-export PATH=/home/ongunakay/bin:$PATH
-
-[[ -e "/home/ongunakay/lib/oracle-cli/lib/python3.12/site-packages/oci_cli/bin/oci_autocomplete.sh" ]] && source "/home/ongunakay/lib/oracle-cli/lib/python3.12/site-packages/oci_cli/bin/oci_autocomplete.sh"
