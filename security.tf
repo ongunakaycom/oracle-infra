@@ -40,7 +40,7 @@ resource "oci_core_network_security_group_security_rule" "allow_https" {
 resource "oci_core_network_security_group_security_rule" "allow_ssh_internal" {
   network_security_group_id = oci_core_network_security_group.web_nsg.id
   direction                 = "INGRESS"
-  protocol                  = "6" # TCP
+  protocol                  = "6"           # TCP
   source                    = "10.0.0.0/16" # VCN CIDR bloğunuz
   source_type               = "CIDR_BLOCK"
 
