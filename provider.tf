@@ -1,17 +1,34 @@
 terraform {
+  required_version = ">= 1.10.0"
+
   required_providers {
     oci = {
       source  = "oracle/oci"
-      version = "~> 5.0"
+      version = "~> 6.0"
     }
   }
-  required_version = ">= 1.5.0"
+
+  # %100 Ücretsiz OCI Object Storage + Native State Locking
+  backend "s3" {
+    bucket                      = "terraform-state-bucket"
+    key                         = "prod/terraform.tfstate"
+    region                      = "eu-frankfurt-1"
+    endpoints = {
+      s3 = "https://fr78sbhgohlv.compat.objectstorage.eu-frankfurt-1.oraclecloud.com"
+    }
+    skip_region_validation      = true
+    skip_credentials_validation = true
+    skip_requesting_account_id  = true
+    skip_s3_checksum            = true
+    use_path_style              = true
+    use_lockfile                = true
+  }
 }
 
 provider "oci" {
-  tenancy_ocid     = "ocid1.tenancy.oc1..aaaaaaaattfjsgbmgtp7vyck47uyqsdsjd3zbwpnwsll5qst7y7atix3sclq"
-  user_ocid        = "ocid1.user.oc1..aaaaaaaasbakzmvvcnfchwnflihxeiwa5tjtphdnochm25k6cc7xihku5iaa"
-  fingerprint      = "30:5c:ce:bf:da:7b:ab:f0:c4:c9:9e:c1:0b:b9:04:ef"
-  private_key_path = "/home/ongunakay/.oci/oci_api_key.pem"
-  region           = "eu-frankfurt-1"
+  tenancy_ocid     = var.tenancy_ocid
+  user_ocid        = var.user_ocid
+  fingerprint      = var.fingerprint
+  private_key_path = var.private_key_path
+  region           = var.region
 }
