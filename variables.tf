@@ -46,8 +46,14 @@ variable "vcn_id" {
   type        = string
 }
 
-variable "ssh_public_key_path" {
-  description = "Yeni oluşturulan SSH Public Key dosya yolu"
+variable "ssh_public_key" {
+  description = "Compute instance için SSH Public Key içeriği"
   type        = string
-  default     = "~/.ssh/oci_prod_key.pub"
+  default     = ""
+}
+
+variable "bastion_allowed_cidrs" {
+  description = "OCI Bastion servisine bağlanmasına izin verilen CIDR blokları (CKV_OCI_21)"
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
 }

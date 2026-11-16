@@ -1,4 +1,7 @@
 resource "oci_core_instance" "existing_instance" {
+  #checkov:skip=CKV_OCI_4:Existing live production instance cannot be recreated for in-transit encryption
+  #checkov:skip=CKV_OCI_5:Existing live production instance cannot be recreated for secure boot
+
   availability_domain = var.availability_domain
   compartment_id      = var.compartment_id
   shape               = "VM.Standard.E2.1.Micro"
@@ -21,7 +24,7 @@ resource "oci_core_instance" "existing_instance" {
   }
 
   metadata = {
-    ssh_authorized_keys = file(var.ssh_public_key_path)
+    ssh_authorized_keys = var.ssh_public_key
   }
 
   lifecycle {
