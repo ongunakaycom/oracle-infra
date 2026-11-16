@@ -41,7 +41,7 @@ jobs:
           soft_fail: true
 
   deploy-static-content:
-    name: Deploy Static Web Content
+    name: Build & Deploy React Frontend
     needs: terraform-validate-and-security
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     runs-on: ubuntu-latest
@@ -50,8 +50,35 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Deploy to OCI Instance via Object Storage / Pull Mechanism or SSH
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Dependencies & Build Vite App
+        working-directory: ./frontend
         run: |
-          echo "Static website content ready for deployment."
-          # İlerleyen aşamada OCI Object Storage veya Bastion/SSH üzerinden rsync ile index.html güncellenebilir.
-          echo "To update production Nginx, place index.html sync script here."
+          npm ci
+          npm run build
+
+      - name: Deploy Build to OCI Instance
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          REMOTE_HOST: "89.168.99.211"
+          REMOTE_USER: "opc"
+        run: |
+          mkdir -p ~/.ssh
+          printf "%s\n" "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$REMOTE_HOST" >> ~/.ssh/known_hosts
+
+          # Sunucu hedef klasörünün yazma izinlerini hazırla
+          ssh -i ~/.ssh/deploy_key "$REMOTE_USER@$REMOTE_HOST" "sudo mkdir -p /usr/share/nginx/html && sudo chown -R $REMOTE_USER:$REMOTE_USER /usr/share/nginx/html"
+
+          # Vite dist/ çıktısını senkronize et
+          rsync -avz --delete -e "ssh -i ~/.ssh/deploy_key" frontend/dist/ "$REMOTE_USER@$REMOTE_HOST:/usr/share/nginx/html/"
+
+          # Oracle Linux SELinux dosya bağlamını yenile
+          ssh -i ~/.ssh/deploy_key "$REMOTE_USER@$REMOTE_HOST" "sudo restorecon -Rv /usr/share/nginx/html"
