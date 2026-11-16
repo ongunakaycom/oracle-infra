@@ -40,8 +40,8 @@ jobs:
           output_format: cli
           soft_fail: true
 
-  deploy-static-content:
-    name: Deploy Static Web Content
+  deploy-frontend:
+    name: Deploy React Frontend
     needs: terraform-validate-and-security
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     runs-on: ubuntu-latest
@@ -50,8 +50,25 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Deploy to OCI Instance via Object Storage / Pull Mechanism or SSH
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: './frontend/package-lock.json'
+
+      - name: Install Dependencies & Build React App
+        working-directory: ./frontend
         run: |
-          echo "Static website content ready for deployment."
-          # İlerleyen aşamada OCI Object Storage veya Bastion/SSH üzerinden rsync ile index.html güncellenebilir.
-          echo "To update production Nginx, place index.html sync script here."
+          npm ci
+          npm run build
+
+      - name: Deploy Build to OCI Instance via SSH
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: "./frontend/dist/*"
+          target: "/usr/share/nginx/html/"
+          strip_components: 2
