@@ -10,6 +10,7 @@ ExecStart=/home/opc/secops-api/secops-api
 Restart=always
 RestartSec=5
 MemoryMax=128M
+EnvironmentFile=/etc/secops/secops.env
 StandardOutput=journal
 StandardError=journal
 
