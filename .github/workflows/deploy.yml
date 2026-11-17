@@ -96,7 +96,7 @@ jobs:
           rsync -avz --delete -e "ssh -i ~/.ssh/deploy_key" frontend/dist/ "$REMOTE_USER@$REMOTE_HOST:/usr/share/nginx/html/"
 
           # Go binary'yi sunucuya kopyala
-          rsync -avz -e "ssh -i ~/.ssh/deploy_key" backend/secops-api "$REMOTE_USER@$REMOTE_HOST:/home/opc/secops-api/"
+          rsync -avz -e "ssh -i ~/.ssh/deploy_key" backend/secops-api backend/secops-api.service "$REMOTE_USER@$REMOTE_HOST:/home/opc/secops-api/"
 
           # Systemd servisini kur ve yeniden başlat
           ssh -i ~/.ssh/deploy_key "$REMOTE_USER@$REMOTE_HOST" "sudo mkdir -p /etc/secops && sudo cp /home/opc/secops-api/secops-api.service /etc/systemd/system/secops-api.service"
