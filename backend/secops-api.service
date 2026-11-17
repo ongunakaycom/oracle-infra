@@ -5,14 +5,19 @@ After=network.target
 [Service]
 Type=simple
 User=opc
-WorkingDirectory=/home/opc/secops-api
-ExecStart=/home/opc/secops-api/secops-api
+Group=opc
+WorkingDirectory=/opt/secops
+ExecStart=/opt/secops/secops-api
 Restart=always
 RestartSec=5
 MemoryMax=128M
 EnvironmentFile=/etc/secops/secops.env
 StandardOutput=journal
 StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
 
 [Install]
 WantedBy=multi-user.target

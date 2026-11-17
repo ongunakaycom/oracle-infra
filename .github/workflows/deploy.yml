@@ -90,22 +90,48 @@ jobs:
           ssh-keyscan -H "$REMOTE_HOST" >> ~/.ssh/known_hosts
 
           # Sunucu hedef klasörlerini hazırla
-          ssh -i ~/.ssh/deploy_key "$REMOTE_USER@$REMOTE_HOST" "sudo mkdir -p /usr/share/nginx/html /home/opc/secops-api && sudo chown -R $REMOTE_USER:$REMOTE_USER /usr/share/nginx/html /home/opc/secops-api"
+          ssh -i ~/.ssh/deploy_key "$REMOTE_USER@$REMOTE_HOST" "sudo mkdir -p /usr/share/nginx/html /home/opc/secops-api /opt/secops /etc/secops && sudo chown -R $REMOTE_USER:$REMOTE_USER /usr/share/nginx/html /home/opc/secops-api /opt/secops"
 
           # Vite dist/ çıktısını senkronize et
           rsync -avz --delete -e "ssh -i ~/.ssh/deploy_key" frontend/dist/ "$REMOTE_USER@$REMOTE_HOST:/usr/share/nginx/html/"
 
-          # Go binary'yi sunucuya kopyala
+          # Go binary ve systemd unit dosyasını sunucuya kopyala
           rsync -avz -e "ssh -i ~/.ssh/deploy_key" backend/secops-api backend/secops-api.service "$REMOTE_USER@$REMOTE_HOST:/home/opc/secops-api/"
 
-          # Systemd servisini kur ve yeniden başlat
-          ssh -i ~/.ssh/deploy_key "$REMOTE_USER@$REMOTE_HOST" "sudo mkdir -p /etc/secops && sudo cp /home/opc/secops-api/secops-api.service /etc/systemd/system/secops-api.service"
-          
-          # Eğer sunucuda /etc/secops/secops.env yoksa örnek oluştur
-          ssh -i ~/.ssh/deploy_key "$REMOTE_USER@$REMOTE_HOST" "if [ ! -f /etc/secops/secops.env ]; then echo -e 'SECOPS_ADMIN_USER=admin\nSECOPS_ADMIN_PASS=oracle123!\nSECOPS_JWT_SECRET=super-secure-jwt-prod-key-2026' | sudo tee /etc/secops/secops.env > /dev/null; sudo chmod 600 /etc/secops/secops.env; fi"
+          # Ortam dosyası yoksa oluştur (değerler CI tarafından geri okunmaz)
+          ssh -i ~/.ssh/deploy_key "$REMOTE_USER@$REMOTE_HOST" "if [ ! -f /etc/secops/secops.env ]; then echo -e 'SECOPS_ADMIN_USER=admin\nSECOPS_ADMIN_PASS=oracle123!\nSECOPS_JWT_SECRET=super-secure-jwt-prod-key-2026' | sudo tee /etc/secops/secops.env > /dev/null; fi; sudo chown root:root /etc/secops/secops.env && sudo chmod 600 /etc/secops/secops.env"
 
-          scp -i ~/.ssh/deploy_key backend/secops-api.service "$REMOTE_USER@$REMOTE_HOST:/tmp/secops-api.service"
-          ssh -i ~/.ssh/deploy_key "$REMOTE_USER@$REMOTE_HOST" "sudo mv /tmp/secops-api.service /etc/systemd/system/secops-api.service && sudo systemctl daemon-reload && sudo systemctl enable secops-api && sudo systemctl restart secops-api"
+          # Binary'yi SELinux'un systemd için izin verdiği /opt/secops altına kur, servisi başlat ve doğrula
+          ssh -i ~/.ssh/deploy_key "$REMOTE_USER@$REMOTE_HOST" bash -s <<'REMOTE'
+          set -euo pipefail
 
-          # Oracle Linux SELinux dosya bağlamını yenile
-          ssh -i ~/.ssh/deploy_key "$REMOTE_USER@$REMOTE_HOST" "sudo restorecon -Rv /usr/share/nginx/html"
+          # Eski konumdaki SQLite veritabanını koru
+          if [ -f /home/opc/secops-api/secops.db ] && [ ! -f /opt/secops/secops.db ]; then
+            sudo mv /home/opc/secops-api/secops.db /opt/secops/secops.db
+          fi
+
+          sudo install -o opc -g opc -m 0755 /home/opc/secops-api/secops-api /opt/secops/secops-api
+          sudo install -o root -g root -m 0644 /home/opc/secops-api/secops-api.service /etc/systemd/system/secops-api.service
+
+          sudo restorecon -Rv /opt/secops /usr/share/nginx/html >/dev/null 2>&1 || true
+
+          sudo systemctl daemon-reload
+          sudo systemctl enable secops-api >/dev/null 2>&1 || true
+          sudo systemctl restart secops-api
+
+          sleep 3
+          echo "--- systemctl status ---"
+          sudo systemctl status secops-api --no-pager -l | head -40 || true
+          echo "--- recent journal ---"
+          sudo journalctl -u secops-api -n 60 --no-pager || true
+          echo "--- health probe ---"
+          if command -v curl >/dev/null 2>&1 && curl -fsS -m 5 http://127.0.0.1:8080/api/health; then
+            echo
+            echo "Deployment health check passed"
+          elif timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080' 2>/dev/null; then
+            echo "Port 8080 is listening (curl not available for HTTP probe)"
+          else
+            echo "::error::secops-api is not responding on 127.0.0.1:8080"
+            exit 1
+          fi
+          REMOTE
