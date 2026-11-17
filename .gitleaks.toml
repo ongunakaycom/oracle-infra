@@ -1,0 +1,13 @@
+title = "Oracle Infra Gitleaks Config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allow Go build flags in documentation"
+paths = [
+  '''^README\.md$''',
+]
+regexes = [
+  '''CGO_ENABLED=0''',
+]
