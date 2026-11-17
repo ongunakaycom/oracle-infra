@@ -53,7 +53,7 @@ variable "ssh_public_key" {
 }
 
 variable "bastion_allowed_cidrs" {
-  description = "OCI Bastion servisine bağlanmasına izin verilen CIDR blokları (CKV_OCI_21)"
+  description = "OCI Bastion servisine bağlanmasına izin verilen CIDR blokları (Kendi IP adresinizle sınırlayın)"
   type        = list(string)
-  default     = ["0.0.0.0/0"]
+  default     = ["89.168.99.211/32"] # Güvenlik için kendi IP adresinizle güncelleyin
 }
