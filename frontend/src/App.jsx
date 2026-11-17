@@ -1,63 +1,116 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import './index.css';
 
 function App() {
-  const [token, setToken] = useState(localStorage.getItem('token') || '');
-  const [health, setHealth] = useState({ status: 'OFFLINE', cpu_percent: '0%', memory_used: '0 MB / 1024 MB', uptime: '0d 0h', latency: 0 });
+  const [token, setToken] = useState(() => localStorage.getItem('token') || '');
+  const [edgeOnline, setEdgeOnline] = useState(false);
+  const [metrics, setMetrics] = useState({ cpu_percent: '—', memory_used: '—', uptime: '—', latency: 0 });
   const [records, setRecords] = useState([]);
   const [search, setSearch] = useState('');
-  const [isLoggedIn, setIsLoggedIn] = useState(!!token);
   const [showLoginModal, setShowLoginModal] = useState(false);
   const [loginError, setLoginError] = useState('');
-  
+  const [authenticating, setAuthenticating] = useState(false);
+  const [loadingRecords, setLoadingRecords] = useState(false);
+  const [recordError, setRecordError] = useState('');
+
   // New Audit Record Form State
   const [newService, setNewService] = useState('caddy-proxy');
   const [newSeverity, setNewSeverity] = useState('INFO');
   const [newMsg, setNewMsg] = useState('');
 
-  // Health Check & Records Fetch
-  useEffect(() => {
-    const fetchHealth = async () => {
-      const start = performance.now();
-      try {
-        const res = await fetch('/api/health');
-        const data = await res.json();
-        const latency = Math.round(performance.now() - start);
-        setHealth({ ...data, status: 'OPERATIONAL', latency });
-      } catch (err) {
-        setHealth({ status: 'STANDBY', cpu_percent: '14.2%', memory_used: '290 MB / 1024 MB', uptime: '4d 12h', latency: 0 });
-      }
-    };
-    fetchHealth();
-    const interval = setInterval(fetchHealth, 5000);
-    return () => clearInterval(interval);
+  const isLoggedIn = !!token;
+
+  const logout = useCallback(() => {
+    localStorage.removeItem('token');
+    setToken('');
+    setRecords([]);
+    setMetrics({ cpu_percent: '—', memory_used: '—', uptime: '—', latency: 0 });
   }, []);
 
+  // Public availability probe: reports only whether the edge is reachable.
   useEffect(() => {
-    if (isLoggedIn) {
-      fetchRecords();
-    }
-  }, [isLoggedIn]);
+    let active = true;
+    const check = async () => {
+      try {
+        const res = await fetch('/api/health', { cache: 'no-store' });
+        if (active) setEdgeOnline(res.ok);
+      } catch (err) {
+        if (active) setEdgeOnline(false);
+      }
+    };
+    check();
+    const interval = setInterval(check, 15000);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, []);
 
-  const fetchRecords = async () => {
+  const fetchRecords = useCallback(async () => {
+    if (!token) return;
+    setLoadingRecords(true);
     try {
       const res = await fetch('/api/records', {
-        headers: { 'Authorization': `Bearer ${token}` }
+        headers: { 'Authorization': `Bearer ${token}` },
+        cache: 'no-store',
       });
+      if (res.status === 401 || res.status === 403) {
+        logout();
+        return;
+      }
       if (res.ok) {
         const data = await res.json();
-        setRecords(data);
-      } else if (res.status === 401) {
-        logout();
+        setRecords(Array.isArray(data) ? data : []);
       }
     } catch (err) {
       console.error('Failed to fetch audit records', err);
+    } finally {
+      setLoadingRecords(false);
     }
-  };
+  }, [token, logout]);
+
+  // Authenticated telemetry polling. Metrics are never fetched before sign-in.
+  useEffect(() => {
+    if (!token) return;
+    let active = true;
+
+    const fetchMetrics = async () => {
+      const start = performance.now();
+      try {
+        const res = await fetch('/api/metrics', {
+          headers: { 'Authorization': `Bearer ${token}` },
+          cache: 'no-store',
+        });
+        if (res.status === 401 || res.status === 403) {
+          logout();
+          return;
+        }
+        if (!res.ok) return;
+        const data = await res.json();
+        if (active) {
+          setMetrics({ ...data, latency: Math.round(performance.now() - start) });
+        }
+      } catch (err) {
+        // Keep the previous reading; the next poll will retry.
+      }
+    };
+
+    fetchMetrics();
+    const interval = setInterval(fetchMetrics, 5000);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [token, logout]);
+
+  useEffect(() => {
+    if (token) fetchRecords();
+  }, [token, fetchRecords]);
 
   const handleLogin = async (e) => {
     e.preventDefault();
     setLoginError('');
+    setAuthenticating(true);
     const username = e.target.username.value;
     const password = e.target.password.value;
 
@@ -71,18 +124,23 @@ function App() {
         const data = await res.json();
         localStorage.setItem('token', data.token);
         setToken(data.token);
-        setIsLoggedIn(true);
         setShowLoginModal(false);
+        e.target.reset();
+      } else if (res.status === 401) {
+        setLoginError('Invalid username or password.');
       } else {
-        setLoginError('Invalid username or password (try admin / oracle123!)');
+        setLoginError('Authentication is temporarily unavailable.');
       }
     } catch (err) {
-      setLoginError('Authentication service unreachable');
+      setLoginError('Authentication service unreachable.');
+    } finally {
+      setAuthenticating(false);
     }
   };
 
   const handleAddRecord = async (e) => {
     e.preventDefault();
+    setRecordError('');
     if (!newMsg.trim()) return;
 
     try {
@@ -94,23 +152,23 @@ function App() {
         },
         body: JSON.stringify({ service: newService, severity: newSeverity, message: newMsg })
       });
+      if (res.status === 401 || res.status === 403) {
+        logout();
+        return;
+      }
       if (res.ok) {
         setNewMsg('');
         fetchRecords();
+      } else {
+        setRecordError('The audit entry could not be stored.');
       }
     } catch (err) {
-      console.error('Failed to create record', err);
+      setRecordError('The audit entry could not be stored.');
     }
   };
 
-  const logout = () => {
-    localStorage.removeItem('token');
-    setToken('');
-    setIsLoggedIn(false);
-  };
-
-  const filteredRecords = records.filter(r => 
-    r.service.toLowerCase().includes(search.toLowerCase()) || 
+  const filteredRecords = records.filter(r =>
+    r.service.toLowerCase().includes(search.toLowerCase()) ||
     r.message.toLowerCase().includes(search.toLowerCase())
   );
 
@@ -123,11 +181,11 @@ function App() {
           <p>oracle-infra.duckdns.org</p>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-          <span className={`secops-badge ${health.status === 'OPERATIONAL' ? 'healthy' : 'standby'}`}>
-            {health.status}
+          <span className={`secops-badge ${edgeOnline ? 'healthy' : 'standby'}`}>
+            {edgeOnline ? 'EDGE ONLINE' : 'EDGE OFFLINE'}
           </span>
           {!isLoggedIn ? (
-            <button onClick={() => setShowLoginModal(true)} className="secops-btn-small">
+            <button onClick={() => { setLoginError(''); setShowLoginModal(true); }} className="secops-btn-small">
               Operator Sign In
             </button>
           ) : (
@@ -213,10 +271,10 @@ function App() {
           {/* Telemetry KPI Cards */}
           <section className="secops-grid">
             {[
-              { label: 'CPU Load', value: health.cpu_percent },
-              { label: 'Memory Footprint', value: health.memory_used },
-              { label: 'System Uptime', value: health.uptime },
-              { label: 'Edge Latency', value: `${health.latency}ms` },
+              { label: 'CPU Load', value: metrics.cpu_percent },
+              { label: 'Memory Footprint', value: metrics.memory_used },
+              { label: 'System Uptime', value: metrics.uptime },
+              { label: 'Edge Latency', value: `${metrics.latency}ms` },
             ].map((kpi, i) => (
               <div key={i} className="secops-card">
                 <label>{kpi.label}</label>
@@ -252,6 +310,7 @@ function App() {
               />
               <button type="submit" className="secops-btn" style={{ padding: '12px 24px', width: 'auto' }}>Submit</button>
             </form>
+            {recordError && <p style={{ color: '#ef4444', fontSize: '0.85rem', margin: '12px 0 0 0' }}>{recordError}</p>}
           </div>
 
           {/* Audit Logs Table */}
@@ -277,7 +336,9 @@ function App() {
                 <tbody>
                   {filteredRecords.length === 0 ? (
                     <tr>
-                      <td colSpan="4" style={{ textAlign: 'center', color: '#64748b', padding: '32px' }}>No audit events recorded yet.</td>
+                      <td colSpan="4" style={{ textAlign: 'center', color: '#64748b', padding: '32px' }}>
+                        {loadingRecords ? 'Loading audit events...' : 'No audit events recorded yet.'}
+                      </td>
                     </tr>
                   ) : (
                     filteredRecords.map((item) => (
@@ -307,9 +368,11 @@ function App() {
             <button type="button" onClick={() => setShowLoginModal(false)} style={{ position: 'absolute', top: '16px', right: '16px', background: 'transparent', border: 'none', color: '#94a3b8', fontSize: '1.2rem', cursor: 'pointer' }}>×</button>
             <h2>Operator Sign In</h2>
             {loginError && <p style={{ color: '#ef4444', fontSize: '0.85rem', marginBottom: '16px' }}>{loginError}</p>}
-            <input type="text" name="username" placeholder="Username" className="secops-input" required />
-            <input type="password" name="password" placeholder="Password" className="secops-input" required />
-            <button type="submit" className="secops-btn">Authenticate</button>
+            <input type="text" name="username" placeholder="Username" autoComplete="username" className="secops-input" required autoFocus />
+            <input type="password" name="password" placeholder="Password" autoComplete="current-password" className="secops-input" required />
+            <button type="submit" className="secops-btn" disabled={authenticating}>
+              {authenticating ? 'Authenticating...' : 'Authenticate'}
+            </button>
           </form>
         </div>
       )}
