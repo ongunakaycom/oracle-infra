@@ -80,8 +80,9 @@ Public SSH is intentionally not exposed.
 ### Bastion (`bastion.tf`)
 
 A `STANDARD` OCI Bastion is attached to the target subnet. Which client networks may
-connect is controlled by `bastion_allowed_cidrs` — **narrow this to your own IP ranges**;
-the current default (`0.0.0.0/0`) should not be used in production.
+connect is controlled by `bastion_allowed_cidrs`. The default is the operator's current
+egress IP (`83.52.157.115/32`); update it whenever that IP changes, and never widen it to
+`0.0.0.0/0` in production.
 
 ### Remote state
 
@@ -177,25 +178,37 @@ It is generated, not committed.
 3. `terraform validate`
 4. Checkov Terraform scan (`soft_fail: true`, findings are reported but do not block)
 
-**Job 2 — Build & deploy frontend** (push to `main`/`master` only)
+**Job 2 — Build & deploy frontend & Go API** (push to `main`/`master` only)
 
 1. Checkout, Node.js 20 with npm cache (`frontend/package-lock.json`)
 2. `npm ci && npm run build` in `frontend/`
-3. Write `secrets.SSH_PRIVATE_KEY` to a temp key, add the host key to `known_hosts`
-4. Prepare the web root: `/usr/share/nginx/html`
-5. `rsync -avz --delete frontend/dist/ opc@<host>:/usr/share/nginx/html/`
-6. `restorecon -Rv /usr/share/nginx/html` to refresh SELinux contexts
+3. Build the Go API: `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o secops-api main.go`
+4. Write `secrets.SSH_PRIVATE_KEY` to a temp key, add the host key to `known_hosts`
+5. Prepare remote directories: `/usr/share/nginx/html`, `/home/opc/secops-api`, `/opt/secops`
+6. `rsync -avz --delete frontend/dist/ opc@<host>:/usr/share/nginx/html/`
+7. `rsync` the API binary and systemd unit to the host
+8. Render `/etc/secops/secops.env` (mode `600`, root-owned) from repository secrets only —
+   no credential is ever stored in the repository
+9. Install the binary in `/opt/secops` (outside `/home`, so systemd may execute it under
+   SELinux), refresh contexts with `restorecon`
+10. `systemctl daemon-reload && systemctl restart secops-api`
+11. Verify the deployment: print `systemctl status` and the last journal lines, then probe
+    `http://127.0.0.1:8080/api/health`. **The job fails if the service does not answer**, so
+    a broken release can no longer hide behind a `502` from the reverse proxy.
 
 ### Required GitHub configuration
 
 | Name | Type | Purpose |
 | --- | --- | --- |
 | `SSH_PRIVATE_KEY` | Repository secret | Private key for the `opc` user on the target instance |
-| `REMOTE_HOST` | Repository variable | Deploy target hostname (`oracle-infra.duckdns.org`) |
+| `SECOPS_ADMIN_USER` | Repository secret | Operator username loaded into `/etc/secops/secops.env` |
+| `SECOPS_ADMIN_PASS` | Repository secret | Operator password loaded into `/etc/secops/secops.env` |
+| `SECOPS_JWT_SECRET` | Repository secret | HMAC key used to sign and verify HS256 tokens |
+| `REMOTE_HOST` | Repository variable | Deploy target address (`89.168.99.211`) |
 
 The deploy host is read from the `REMOTE_HOST` repository variable, so an IP change only
-requires updating the variable (or DuckDNS) — no code change. The job fails fast with an
-explicit error if the variable is empty.
+requires updating the variable — no code change. The job fails fast with an explicit error
+if any of the values above is empty.
 
 Set it from the CLI:
 
@@ -220,10 +233,8 @@ gh variable get REMOTE_HOST   # verify
 ## Known gaps / next steps
 
 - [x] ~~The deploy host is hardcoded in the workflow~~ — now read from `vars.REMOTE_HOST`.
-- [ ] `bastion_allowed_cidrs` defaults to `0.0.0.0/0`; set it to trusted ranges.
-- [ ] `terraform.tfvars.example` still references `ssh_public_key_path`, which is not a
-      declared variable (use `ssh_public_key`), and omits `vcn_id`.
-- [ ] `frontend/dist` is not ignored by Git; add it to `.gitignore`.
+- [x] ~~`bastion_allowed_cidrs` defaults to `0.0.0.0/0`; set it to trusted ranges.~~ — restricted to operator egress IP (`83.52.157.115/32`).
+- [x] ~~`frontend/dist` is not ignored by Git; add it to `.gitignore`.~~ — added.
 - [ ] `.gitignore` contains a stray `Y` line and ignores all `*.py` files, which also hides
       the helper scripts in the repository root.
 - [ ] Checkov runs with `soft_fail: true`; switch to blocking mode once findings are clean.
