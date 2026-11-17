@@ -59,13 +59,13 @@ func initDB() {
 		log.Fatalf("Failed to create table: %v", err)
 	}
 
-	// Seed initial data if empty
+	// Seed initial professional audit logs if empty
 	var count int
 	db.QueryRow("SELECT COUNT(*) FROM audit_logs").Scan(&count)
 	if count == 0 {
-		db.Exec(`INSERT INTO audit_logs (service, severity, message) VALUES ('caddy-proxy', 'HIGH', 'SSL renewal task failed or proxy timeout detected')`)
-		db.Exec(`INSERT INTO audit_logs (service, severity, message) VALUES ('auth-gateway', 'MEDIUM', 'Rate limit threshold approaching on endpoint /api/login')`)
-		db.Exec(`INSERT INTO audit_logs (service, severity, message) VALUES ('oci-firewall', 'LOW', 'NSG rule synchronized successfully across VCN subnets')`)
+		db.Exec(`INSERT INTO audit_logs (service, severity, message) VALUES ('caddy-proxy', 'INFO', 'TLS certificate automatically renewed via Let''s Encrypt ACME')`)
+		db.Exec(`INSERT INTO audit_logs (service, severity, message) VALUES ('oci-firewall', 'LOW', 'Network Security Group (NSG) ingress rules verified')`)
+		db.Exec(`INSERT INTO audit_logs (service, severity, message) VALUES ('auth-gateway', 'MEDIUM', 'Admin session authenticated successfully from authorized IP range')`)
 	}
 }
 
@@ -104,16 +104,20 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Simple check (admin/admin or demo)
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(LoginResponse{
-		Token: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.demo-jwt-token-active",
-		Role:  "admin",
-	})
+	// Hardcoded secure admin credentials for demo / management
+	if req.Username == "admin" && req.Password == "oracle123!" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(LoginResponse{
+			Token: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.secops-admin-token-verified-live",
+			Role:  "admin",
+		})
+		return
+	}
+
+	http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 }
 
 func handleRecords(w http.ResponseWriter, r *http.Request) {
-	// Auth check
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -159,6 +163,15 @@ func handleRecords(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&rec); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
+		}
+
+		// Sanitize inputs
+		if rec.Service == "" || rec.Message == "" {
+			http.Error(w, "Service and message cannot be empty", http.StatusBadRequest)
+			return
+		}
+		if rec.Severity == "" {
+			rec.Severity = "INFO"
 		}
 
 		res, err := db.Exec("INSERT INTO audit_logs (service, severity, message) VALUES (?, ?, ?)", rec.Service, rec.Severity, rec.Message)
