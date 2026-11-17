@@ -307,8 +307,8 @@ function App() {
             <button type="button" onClick={() => setShowLoginModal(false)} style={{ position: 'absolute', top: '16px', right: '16px', background: 'transparent', border: 'none', color: '#94a3b8', fontSize: '1.2rem', cursor: 'pointer' }}>×</button>
             <h2>Operator Sign In</h2>
             {loginError && <p style={{ color: '#ef4444', fontSize: '0.85rem', marginBottom: '16px' }}>{loginError}</p>}
-            <input type="text" name="username" placeholder="Username (admin)" defaultValue="admin" className="secops-input" required />
-            <input type="password" name="password" placeholder="Password (oracle123!)" defaultValue="oracle123!" className="secops-input" required />
+            <input type="text" name="username" placeholder="Username" className="secops-input" required />
+            <input type="password" name="password" placeholder="Password" className="secops-input" required />
             <button type="submit" className="secops-btn">Authenticate</button>
           </form>
         </div>
