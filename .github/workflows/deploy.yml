@@ -66,9 +66,13 @@ jobs:
       - name: Deploy Build to OCI Instance
         env:
           SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-          REMOTE_HOST: "89.168.99.211"
+          REMOTE_HOST: ${{ vars.REMOTE_HOST }}
           REMOTE_USER: "opc"
         run: |
+          if [ -z "$REMOTE_HOST" ]; then
+            echo "::error::Repository variable REMOTE_HOST is not set"
+            exit 1
+          fi
           mkdir -p ~/.ssh
           printf "%s\n" "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
