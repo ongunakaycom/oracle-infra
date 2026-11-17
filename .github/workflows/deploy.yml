@@ -99,10 +99,11 @@ jobs:
           rsync -avz -e "ssh -i ~/.ssh/deploy_key" backend/secops-api "$REMOTE_USER@$REMOTE_HOST:/home/opc/secops-api/"
 
           # Systemd servisini kur ve yeniden başlat
-          ssh -i ~/.ssh/deploy_key "$REMOTE_USER@$REMOTE_HOST" "sudo cp /home/opc/secops-api/secops-api.service /etc/systemd/system/secops-api.service 2>/dev/null || true"
+          ssh -i ~/.ssh/deploy_key "$REMOTE_USER@$REMOTE_HOST" "sudo mkdir -p /etc/secops && sudo cp /home/opc/secops-api/secops-api.service /etc/systemd/system/secops-api.service"
           
-          # Eğer repo kökünden service dosyası kopyalanacaksa:
-          # (Alternatif olarak backend/ içindeki service dosyasını da gönderelim)
+          # Eğer sunucuda /etc/secops/secops.env yoksa örnek oluştur
+          ssh -i ~/.ssh/deploy_key "$REMOTE_USER@$REMOTE_HOST" "if [ ! -f /etc/secops/secops.env ]; then echo -e 'SECOPS_ADMIN_USER=admin\nSECOPS_ADMIN_PASS=oracle123!\nSECOPS_JWT_SECRET=super-secure-jwt-prod-key-2026' | sudo tee /etc/secops/secops.env > /dev/null; sudo chmod 600 /etc/secops/secops.env; fi"
+
           scp -i ~/.ssh/deploy_key backend/secops-api.service "$REMOTE_USER@$REMOTE_HOST:/tmp/secops-api.service"
           ssh -i ~/.ssh/deploy_key "$REMOTE_USER@$REMOTE_HOST" "sudo mv /tmp/secops-api.service /etc/systemd/system/secops-api.service && sudo systemctl daemon-reload && sudo systemctl enable secops-api && sudo systemctl restart secops-api"
 
