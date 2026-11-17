@@ -1,0 +1,17 @@
+[Unit]
+Description=Oracle Infra SecOps Go API Service
+After=network.target
+
+[Service]
+Type=simple
+User=opc
+WorkingDirectory=/home/opc/secops-api
+ExecStart=/home/opc/secops-api/secops-api
+Restart=always
+RestartSec=5
+MemoryMax=128M
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

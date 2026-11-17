@@ -41,7 +41,7 @@ jobs:
           soft_fail: true
 
   deploy-static-content:
-    name: Build & Deploy React Frontend
+    name: Build & Deploy React Frontend & Go API
     needs: terraform-validate-and-security
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     runs-on: ubuntu-latest
@@ -63,7 +63,17 @@ jobs:
           npm ci
           npm run build
 
-      - name: Deploy Build to OCI Instance
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Build Go SecOps API Binary
+        working-directory: ./backend
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o secops-api main.go
+
+      - name: Deploy Artifacts to OCI Instance
         env:
           SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
           REMOTE_HOST: ${{ vars.REMOTE_HOST }}
@@ -78,11 +88,22 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H "$REMOTE_HOST" >> ~/.ssh/known_hosts
 
-          # Sunucu hedef klasörünün yazma izinlerini hazırla
-          ssh -i ~/.ssh/deploy_key "$REMOTE_USER@$REMOTE_HOST" "sudo mkdir -p /usr/share/nginx/html && sudo chown -R $REMOTE_USER:$REMOTE_USER /usr/share/nginx/html"
+          # Sunucu hedef klasörlerini hazırla
+          ssh -i ~/.ssh/deploy_key "$REMOTE_USER@$REMOTE_HOST" "sudo mkdir -p /usr/share/nginx/html /home/opc/secops-api && sudo chown -R $REMOTE_USER:$REMOTE_USER /usr/share/nginx/html /home/opc/secops-api"
 
           # Vite dist/ çıktısını senkronize et
           rsync -avz --delete -e "ssh -i ~/.ssh/deploy_key" frontend/dist/ "$REMOTE_USER@$REMOTE_HOST:/usr/share/nginx/html/"
+
+          # Go binary'yi sunucuya kopyala
+          rsync -avz -e "ssh -i ~/.ssh/deploy_key" backend/secops-api "$REMOTE_USER@$REMOTE_HOST:/home/opc/secops-api/"
+
+          # Systemd servisini kur ve yeniden başlat
+          ssh -i ~/.ssh/deploy_key "$REMOTE_USER@$REMOTE_HOST" "sudo cp /home/opc/secops-api/secops-api.service /etc/systemd/system/secops-api.service 2>/dev/null || true"
+          
+          # Eğer repo kökünden service dosyası kopyalanacaksa:
+          # (Alternatif olarak backend/ içindeki service dosyasını da gönderelim)
+          scp -i ~/.ssh/deploy_key backend/secops-api.service "$REMOTE_USER@$REMOTE_HOST:/tmp/secops-api.service"
+          ssh -i ~/.ssh/deploy_key "$REMOTE_USER@$REMOTE_HOST" "sudo mv /tmp/secops-api.service /etc/systemd/system/secops-api.service && sudo systemctl daemon-reload && sudo systemctl enable secops-api && sudo systemctl restart secops-api"
 
           # Oracle Linux SELinux dosya bağlamını yenile
           ssh -i ~/.ssh/deploy_key "$REMOTE_USER@$REMOTE_HOST" "sudo restorecon -Rv /usr/share/nginx/html"
