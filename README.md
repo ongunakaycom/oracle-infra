@@ -1,72 +1,250 @@
-# Enterprise Oracle Cloud (OCI) DevOps & CI/CD Infrastructure
+# Oracle Cloud (OCI) DevOps Infrastructure
 
-This repository contains a production-grade, enterprise-level DevOps architecture deployed on **Oracle Cloud Infrastructure (OCI)** utilizing **Terraform**, **Caddy** (with automatic Let's Encrypt SSL), and **GitHub Actions** for CI/CD automation.
+Production-oriented infrastructure-as-code and CI/CD setup for a **React + Vite** site hosted on an **Oracle Cloud Infrastructure Always Free** compute instance.
+
+**Live URL:** https://oracle-infra.duckdns.org/ *(DNS via DuckDNS)*
+
+Terraform provisions and protects the OCI resources, GitHub Actions validates the infrastructure and deploys every frontend build to the server over SSH/rsync.
 
 ---
 
-## 🌟 Architecture Overview
+## Architecture
 
 ```
-[Developer (Git Push)] 
-       │
-       ▼
-[GitHub Actions CI/CD] ──(Security Scan / Build / Deploy)──► [OCI VM (Always Free)]
-       │                                                         │
-       ├─► Terraform (State on OCI Object Storage)               └─► Caddy (HTTP/HTTPS & SSL)
-       └─► Security Linting (Checkov)
+ Developer                 GitHub                        OCI (Always Free)
+ ─────────                 ──────                        ─────────────────
+ git push  ──────────────► Actions workflow
+                              │
+                              ├─► terraform fmt / init / validate
+                              ├─► Checkov security scan
+                              └─► npm ci && npm run build
+                                        │
+                                        └── ssh + rsync ──► VM.Standard.E2.1.Micro
+                                                              └─ Nginx web root
+                                                                 /usr/share/nginx/html
+
+ Terraform state ──► OCI Object Storage (S3-compatible backend, native lockfile)
+```
+
+| Layer | Technology |
+| --- | --- |
+| Infrastructure | Terraform `>= 1.10.0`, OCI provider `~> 6.0` |
+| Compute | `VM.Standard.E2.1.Micro` (Always Free), public IP |
+| Network | VCN subnet + Network Security Group `nsg-enterprise-web-prod` |
+| Remote state | OCI Object Storage via S3-compatible backend with `use_lockfile = true` |
+| DNS / Demo URL | DuckDNS — `https://oracle-infra.duckdns.org/` (maps to instance IP) |
+| Admin access | OCI Bastion Service (no public SSH) |
+| Frontend | React 19 + Vite 8 + ESLint 10 |
+| CI/CD | GitHub Actions (validate, security scan, build, rsync deploy) |
+
+---
+
+## Repository layout
+
+| Path | Purpose |
+| --- | --- |
+| `provider.tf` | Terraform/OCI provider configuration and S3-compatible remote backend |
+| `variables.tf` | Input variables for OCI identifiers, network and access control |
+| `instance.tf` | Always Free compute instance with `prevent_destroy` and `ignore_changes` guards |
+| `security.tf` | NSG and ingress rules for HTTP, HTTPS and internal SSH |
+| `bastion.tf` | OCI Bastion Service used for administrative tunneling |
+| `outputs.tf` | Public and private IP outputs |
+| `terraform.tfvars.example` | Template for the required variable values |
+| `.github/workflows/deploy.yml` | CI/CD pipeline |
+| `frontend/` | React + Vite application that is built and deployed |
+
+> The `.tf`, `.py` and `index.html` files in the repository root are part of the infrastructure layer; the deployed website is built from `frontend/`.
+
+---
+
+## Infrastructure
+
+### Compute instance
+
+- Shape: `VM.Standard.E2.1.Micro` (1 OCPU / 1 GB) — Always Free eligible.
+- Public IP is assigned; the instance is attached to NSG `nsg-enterprise-web-prod`.
+- `lifecycle.prevent_destroy = true` prevents accidental destruction.
+- `ignore_changes` is set for image, metadata, and tags so that image updates, SSH key
+  changes and console edits never force a recreate.
+
+### Network security (`security.tf`)
+
+| Direction | Protocol | Port | Source | Purpose |
+| --- | --- | --- | --- | --- |
+| INGRESS | TCP | 80 | `0.0.0.0/0` | HTTP (redirect + ACME challenges) |
+| INGRESS | TCP | 443 | `0.0.0.0/0` | HTTPS |
+| INGRESS | TCP | 22 | `10.0.0.0/16` (VCN) | SSH, reachable only through the bastion |
+
+Public SSH is intentionally not exposed.
+
+### Bastion (`bastion.tf`)
+
+A `STANDARD` OCI Bastion is attached to the target subnet. Which client networks may
+connect is controlled by `bastion_allowed_cidrs` — **narrow this to your own IP ranges**;
+the current default (`0.0.0.0/0`) should not be used in production.
+
+### Remote state
+
+State lives in the OCI Object Storage bucket configured in `provider.tf`:
+
+- Key: `prod/terraform.tfstate`
+- S3-compatible endpoint (`*.compat.objectstorage.<region>.oraclecloud.com`)
+- Path-style addressing, checksum and credential validation disabled for compatibility
+- Native state locking via `use_lockfile = true` (Terraform 1.10+)
+
+Never commit `*.tfstate`, `*.tfvars` or private keys. They are already covered by `.gitignore`.
+
+---
+
+## Prerequisites
+
+- [Terraform](https://developer.hashicorp.com/terraform/install) `>= 1.10.0`
+- OCI tenancy with an API key pair (`~/.oci/oci_api_key.pem`)
+- OCI identifiers: tenancy OCID, user OCID, API key fingerprint, compartment OCID,
+  availability domain, subnet OCID, VCN OCID
+- Node.js 20+ and npm (for the frontend)
+
+---
+
+## Local setup
+
+Internal use only — clone locally as usual, then:
+
+```bash
+# 1. Provide variables
+cp terraform.tfvars.example terraform.tfvars
+#    then fill in the OCIDs and paths
+
+# 2. Initialise providers and remote state
+terraform init
+
+# 3. Review the plan
+terraform plan
+
+# 4. Apply (only when the plan is expected)
+terraform apply
+```
+
+### Required variables
+
+| Variable | Required | Description |
+| --- | --- | --- |
+| `tenancy_ocid` | yes | OCI tenancy OCID |
+| `user_ocid` | yes | OCI user OCID owning the API key |
+| `fingerprint` | yes | API key fingerprint |
+| `private_key_path` | no | API private key path (default `~/.oci/oci_api_key.pem`) |
+| `region` | no | OCI region (default `eu-frankfurt-1`) |
+| `compartment_id` | yes | Compartment OCID for all resources |
+| `availability_domain` | no | Target AD (default `FVLm:EU-FRANKFURT-1-AD-3`) |
+| `subnet_id` | yes | Subnet the instance and bastion attach to |
+| `vcn_id` | yes | VCN owning the NSG |
+| `ssh_public_key` | no | Public key injected into instance metadata |
+| `bastion_allowed_cidrs` | no | CIDRs allowed to use the bastion |
+
+### Outputs
+
+```bash
+terraform output instance_public_ip
+terraform output instance_private_ip
 ```
 
 ---
 
-## 🔒 1. Security & Compliance (Zero Trust)
-* **Secret Management & Repo Hygiene:** Sensitive files, API keys (`.pem`), and local state files (`.tfstate`) are excluded via `.gitignore` and managed securely through **GitHub Actions Secrets**.
-* **Remote State & Locking:** Terraform state is stored securely in an encrypted **OCI Object Storage Bucket**, utilizing native state locking (`use_lockfile = true`) to prevent race conditions during concurrent runs.
-* **Network Security Group (NSG):** Direct public access via SSH (`Port 22`) is disabled. Web traffic is strictly restricted to HTTP (`80`) and HTTPS (`443`), protected by dedicated OCI NSGs.
-* **Always Free Protection:** Configured with `prevent_destroy = true` and comprehensive `ignore_changes` blocks to safeguard the `VM.Standard.E2.1.Micro` instance against accidental recreation or destruction.
+## Frontend
+
+```bash
+cd frontend
+npm ci          # clean install
+npm run dev     # local dev server with HMR
+npm run lint    # ESLint
+npm run build   # production build -> frontend/dist
+npm run preview # preview the production build locally
+```
+
+The build output (`frontend/dist`) is what the pipeline uploads to the server.
+It is generated, not committed.
 
 ---
 
-## 🏗️ 2. Infrastructure as Code (Terraform Structure)
+## CI/CD pipeline
 
-The codebase is organized into modular, clean components:
-* `provider.tf`: OCI provider configuration and S3-compatible remote backend.
-* `variables.tf`: Parametrized variables for environments and resource OCIDs.
-* `instance.tf`: Always Free compute instance configuration with lifecycle protection.
-* `security.tf`: Zero-Trust Network Security Group (NSG) and firewall rules.
-* `bastion.tf`: OCI Bastion Service integration for secure administrative tunneling.
-* `outputs.tf`: Public/private IP outputs.
+`.github/workflows/deploy.yml` runs on every push and pull request to `main`/`master`.
+
+**Job 1 — Terraform validate & security scan** (all events)
+
+1. `terraform fmt -check`
+2. `terraform init -backend=false`
+3. `terraform validate`
+4. Checkov Terraform scan (`soft_fail: true`, findings are reported but do not block)
+
+**Job 2 — Build & deploy frontend** (push to `main`/`master` only)
+
+1. Checkout, Node.js 20 with npm cache (`frontend/package-lock.json`)
+2. `npm ci && npm run build` in `frontend/`
+3. Write `secrets.SSH_PRIVATE_KEY` to a temp key, add the host key to `known_hosts`
+4. Prepare the web root: `/usr/share/nginx/html`
+5. `rsync -avz --delete frontend/dist/ opc@<host>:/usr/share/nginx/html/`
+6. `restorecon -Rv /usr/share/nginx/html` to refresh SELinux contexts
+
+### Required GitHub configuration
+
+| Name | Type | Purpose |
+| --- | --- | --- |
+| `SSH_PRIVATE_KEY` | Repository secret | Private key for the `opc` user on the target instance |
+| `REMOTE_HOST` | Repository variable | Deploy target hostname (`oracle-infra.duckdns.org`) |
+
+The deploy host is read from the `REMOTE_HOST` repository variable, so an IP change only
+requires updating the variable (or DuckDNS) — no code change. The job fails fast with an
+explicit error if the variable is empty.
+
+Set it from the CLI:
+
+```bash
+echo "oracle-infra.duckdns.org" | gh variable set REMOTE_HOST
+gh variable get REMOTE_HOST   # verify
+```
 
 ---
 
-## 🚀 3. CI/CD Pipeline (GitHub Actions)
+## Security posture
 
-Every push to `main` triggers a fully automated enterprise pipeline:
-1. **Lint & Validate:** `terraform fmt` and `terraform validate` check syntax.
-2. **Security Scan:** `Checkov` scans infrastructure code for security misconfigurations.
-3. **Build & Deploy:** Automated compilation and deployment of web assets directly to the production OCI server.
-
----
-
-## 🌐 4. Web Server & SSL
-* **Caddy Web Server:** Lightweight, high-performance web server replacing traditional Nginx.
-* **Automated SSL:** Seamless integration with **Let's Encrypt** via dynamic DNS (`nip.io`), providing valid HTTPS encryption out-of-the-box.
+- No secrets, private keys, state files or `*.tfvars` in version control.
+- Public SSH is not exposed; administration goes through OCI Bastion.
+- The instance is protected against accidental destroy/recreate.
+- The pipeline receives only a deploy key, not OCI API credentials, so a compromised
+  workflow cannot modify infrastructure.
+- Checkov runs on every change; its output should be reviewed even when `soft_fail` is on.
 
 ---
 
-## 🛠️ Quick Start
+## Known gaps / next steps
 
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/ongunakaycom/oracle-infra.git
-   cd oracle-infra
-   ```
+- [x] ~~The deploy host is hardcoded in the workflow~~ — now read from `vars.REMOTE_HOST`.
+- [ ] `bastion_allowed_cidrs` defaults to `0.0.0.0/0`; set it to trusted ranges.
+- [ ] `terraform.tfvars.example` still references `ssh_public_key_path`, which is not a
+      declared variable (use `ssh_public_key`), and omits `vcn_id`.
+- [ ] `frontend/dist` is not ignored by Git; add it to `.gitignore`.
+- [ ] `.gitignore` contains a stray `Y` line and ignores all `*.py` files, which also hides
+      the helper scripts in the repository root.
+- [ ] Checkov runs with `soft_fail: true`; switch to blocking mode once findings are clean.
+- [ ] Legacy helpers (`add_key.py`, `extract_key.py`, `fix_and_connect.py`,
+      `update_infra.py`) and the repository-root `index.html` are unused by the pipeline
+      and can be removed.
 
-2. **Initialize Terraform:**
-   ```bash
-   terraform init
-   ```
+---
 
-3. **Plan infrastructure changes:**
-   ```bash
-   terraform plan
-   ```
+## Troubleshooting
+
+| Symptom | Likely cause / fix |
+| --- | --- |
+| `terraform init` fails on the backend | Wrong bucket, endpoint or region in `provider.tf`; check OCI customer secret keys and bucket name |
+| `terraform apply` refuses to replace the instance | Expected: `prevent_destroy` is enabled. Change the lifecycle block intentionally if a recreate is truly required |
+| Deploy step fails on `rsync` | Missing `SSH_PRIVATE_KEY`, `REMOTE_HOST` variable unset/wrong, or the key is not authorised for `opc` |
+| Website shows old content after deploy | `rsync --delete` runs on `/usr/share/nginx/html`; confirm the workflow completed and Nginx serves that root |
+| SSH from your machine times out | Port 22 is only open from the VCN CIDR; connect through the OCI Bastion session instead |
+
+---
+
+## License
+
+[MIT](LICENSE) © Ongun Akay
