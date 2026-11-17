@@ -4,10 +4,13 @@ title = "Oracle Infra Gitleaks Config"
 useDefault = true
 
 [allowlist]
-description = "Allow Go build flags in documentation"
+description = "Allow documentation flags and historical placeholder token format"
 paths = [
   '''^README\.md$''',
 ]
 regexes = [
   '''CGO_ENABLED=0''',
+]
+commits = [
+  "7ad360222a39f19369055b0e89ca84884f1216ab",
 ]
