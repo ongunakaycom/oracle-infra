@@ -1,0 +1,23 @@
+# Caddyfile for OCI Enterprise Production
+# Domain: https://oracle-infra.duckdns.org/
+
+oracle-infra.duckdns.org {
+    # Security Headers (Hardening)
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Frame-Options "DENY"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        X-XSS-Protection "1; mode=block"
+    }
+
+    # API Reverse Proxy to Go Backend
+    handle /api/* {
+        reverse_proxy 127.0.0.1:8080
+    }
+
+    # Static Frontend Root (React / Vite build output)
+    root * /usr/share/nginx/html
+    file_server
+    try_files {path} {path}/ /index.html
+}
