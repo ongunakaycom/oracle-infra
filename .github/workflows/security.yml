@@ -48,11 +48,11 @@ jobs:
           echo "=== Full Tree Advisory Report (Non-blocking for overridden devDependencies) ==="
           npm audit --audit-level=high || true
 
-      - name: Setup Go for Vulnerability Audit
-        if: hashFiles('backend/go.mod') != ''
+      - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: backend/go.mod
+          go-version: '1.26.11'
+          cache-dependency-path: '**/go.sum'
 
       - name: Backend Go Vulnerability Check (Layer 2 - govulncheck)
         if: hashFiles('backend/go.mod') != ''

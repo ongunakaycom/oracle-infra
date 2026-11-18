@@ -1,6 +1,6 @@
 module secops-api
 
-go 1.24
+go 1.26.11
 
 require modernc.org/sqlite v1.28.0
 
