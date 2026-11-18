@@ -68,6 +68,13 @@ jobs:
         with:
           go-version: "1.23"
 
+      - name: Test Go SecOps API
+        working-directory: ./backend
+        run: |
+          go get modernc.org/sqlite@v1.28.0
+          go vet ./...
+          go test -v -race ./...
+
       - name: Build Go SecOps API Binary
         working-directory: ./backend
         run: |
@@ -79,9 +86,16 @@ jobs:
           SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
           REMOTE_HOST: ${{ vars.REMOTE_HOST }}
           REMOTE_USER: "opc"
+          SECOPS_ADMIN_USER: ${{ secrets.SECOPS_ADMIN_USER }}
+          SECOPS_ADMIN_PASS: ${{ secrets.SECOPS_ADMIN_PASS }}
+          SECOPS_JWT_SECRET: ${{ secrets.SECOPS_JWT_SECRET }}
         run: |
           if [ -z "$REMOTE_HOST" ]; then
             echo "::error::Repository variable REMOTE_HOST is not set"
+            exit 1
+          fi
+          if [ -z "$SECOPS_ADMIN_USER" ] || [ -z "$SECOPS_ADMIN_PASS" ] || [ -z "$SECOPS_JWT_SECRET" ]; then
+            echo "::error::SECOPS_ADMIN_USER, SECOPS_ADMIN_PASS and SECOPS_JWT_SECRET repository secrets must be set"
             exit 1
           fi
           mkdir -p ~/.ssh
@@ -95,11 +109,14 @@ jobs:
           # Vite dist/ çıktısını senkronize et
           rsync -avz --delete -e "ssh -i ~/.ssh/deploy_key" frontend/dist/ "$REMOTE_USER@$REMOTE_HOST:/usr/share/nginx/html/"
 
-          # Go binary ve systemd unit dosyasını sunucuya kopyala
-          rsync -avz -e "ssh -i ~/.ssh/deploy_key" backend/secops-api backend/secops-api.service "$REMOTE_USER@$REMOTE_HOST:/home/opc/secops-api/"
+          # Go binary, systemd unit ve Caddy edge yapılandırmasını sunucuya kopyala
+          rsync -avz -e "ssh -i ~/.ssh/deploy_key" backend/secops-api backend/secops-api.service backend/Caddyfile "$REMOTE_USER@$REMOTE_HOST:/home/opc/secops-api/"
 
-          # Ortam dosyası yoksa oluştur (değerler CI tarafından geri okunmaz)
-          ssh -i ~/.ssh/deploy_key "$REMOTE_USER@$REMOTE_HOST" "if [ ! -f /etc/secops/secops.env ]; then echo -e 'SECOPS_ADMIN_USER=admin\nSECOPS_ADMIN_PASS=oracle123!\nSECOPS_JWT_SECRET=super-secure-jwt-prod-key-2026' | sudo tee /etc/secops/secops.env > /dev/null; fi; sudo chown root:root /etc/secops/secops.env && sudo chmod 600 /etc/secops/secops.env"
+          # Ortam dosyasını yalnızca repository secret'larından üret (600, root)
+          ENV_PAYLOAD=$(printf 'SECOPS_ADMIN_USER=%s\nSECOPS_ADMIN_PASS=%s\nSECOPS_JWT_SECRET=%s\n' \
+            "$SECOPS_ADMIN_USER" "$SECOPS_ADMIN_PASS" "$SECOPS_JWT_SECRET" | base64 -w0)
+          printf '%s' "$ENV_PAYLOAD" | ssh -i ~/.ssh/deploy_key "$REMOTE_USER@$REMOTE_HOST" \
+            "umask 077 && sudo install -d -m 0700 -o root -g root /etc/secops && base64 -d | sudo tee /etc/secops/secops.env >/dev/null && sudo chown root:root /etc/secops/secops.env && sudo chmod 600 /etc/secops/secops.env"
 
           # Binary'yi SELinux'un systemd için izin verdiği /opt/secops altına kur, servisi başlat ve doğrula
           ssh -i ~/.ssh/deploy_key "$REMOTE_USER@$REMOTE_HOST" bash -s <<'REMOTE'
@@ -112,6 +129,24 @@ jobs:
 
           sudo install -o opc -g opc -m 0755 /home/opc/secops-api/secops-api /opt/secops/secops-api
           sudo install -o root -g root -m 0644 /home/opc/secops-api/secops-api.service /etc/systemd/system/secops-api.service
+
+          # Caddy: yeni yapılandırmayı doğrula, yedekle ve ancak başarılıysa devreye al
+          if command -v caddy >/dev/null 2>&1 && [ -d /etc/caddy ]; then
+            sudo install -o root -g root -m 0644 /home/opc/secops-api/Caddyfile /etc/caddy/Caddyfile.next
+            if sudo caddy validate --config /etc/caddy/Caddyfile.next --adapter caddyfile; then
+              if [ -f /etc/caddy/Caddyfile ]; then
+                sudo cp -a /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak
+              fi
+              sudo mv /etc/caddy/Caddyfile.next /etc/caddy/Caddyfile
+              sudo systemctl reload caddy 2>/dev/null || sudo systemctl restart caddy
+            else
+              sudo rm -f /etc/caddy/Caddyfile.next
+              echo "::error::Caddyfile validation failed; keeping the previous configuration"
+              exit 1
+            fi
+          else
+            echo "::warning::Caddy is not installed on the target; skipping edge configuration"
+          fi
 
           sudo restorecon -Rv /opt/secops /usr/share/nginx/html >/dev/null 2>&1 || true
 

@@ -51,3 +51,44 @@ resource "oci_core_network_security_group_security_rule" "allow_ssh_internal" {
     }
   }
 }
+
+# NSG kuralları, subnet'e bağlı Security List kurallarıyla birlikte (additive)
+# uygulanır. Security List port 22'yi 0.0.0.0/0 kaynağına açıyorsa NSG'deki
+# VCN içi kısıtlama tek başına yeterli olmaz. Aşağıdaki kontrol, canlı ortamda
+# unutulmuş bir "public SSH" kuralını plan çıktısında görünür kılar.
+data "oci_core_subnet" "target" {
+  subnet_id = var.subnet_id
+}
+
+data "oci_core_security_lists" "vcn" {
+  compartment_id = var.compartment_id
+  vcn_id         = var.vcn_id
+}
+
+locals {
+  subnet_security_list_ids = toset(data.oci_core_subnet.target.security_list_ids)
+
+  security_lists_allowing_public_ssh = [
+    for security_list in data.oci_core_security_lists.vcn.security_lists : security_list.display_name
+    if contains(local.subnet_security_list_ids, security_list.id) && anytrue([
+      for rule in security_list.ingress_security_rules : (
+        contains(["6", "all"], rule.protocol) &&
+        contains(["0.0.0.0/0", "::/0"], rule.source) &&
+        (
+          rule.protocol == "all" ||
+          anytrue([
+            for port_range in try(rule.tcp_options[0].destination_port_range, []) :
+            port_range.min <= 22 && port_range.max >= 22
+          ])
+        )
+      )
+    ])
+  ]
+}
+
+check "ssh_not_exposed_to_internet" {
+  assert {
+    condition     = length(local.security_lists_allowing_public_ssh) == 0
+    error_message = "Subnet'e bağlı şu Security List(ler) 22/tcp portunu internete açıyor: ${join(", ", local.security_lists_allowing_public_ssh)}. NSG kuralları Security List ile birlikte uygulanır; docs/security-remediation.md adımlarını izleyerek kuralı kaldırın."
+  }
+}

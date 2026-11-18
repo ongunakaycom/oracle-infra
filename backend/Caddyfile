@@ -1,0 +1,37 @@
+# Caddyfile for OCI Enterprise Production
+# Domain: https://oracle-infra.duckdns.org/
+#
+# This file is the source of truth for the edge configuration and is deployed
+# by .github/workflows/deploy.yml (validated with `caddy validate` before it is
+# moved into place).
+
+oracle-infra.duckdns.org {
+    # Security Headers (Hardening)
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Frame-Options "DENY"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        # The legacy XSS auditor is removed from modern browsers; disabling it
+        # avoids its documented side channels.
+        X-XSS-Protection "0"
+        Cross-Origin-Opener-Policy "same-origin"
+        Cross-Origin-Resource-Policy "same-origin"
+        # React writes inline style attributes, hence 'unsafe-inline' for
+        # style-src. Scripts stay restricted to same-origin bundles.
+        Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests"
+        Permissions-Policy "accelerometer=(), camera=(), geolocation=(), gyroscope=(), microphone=(), payment=(), usb=(), interest-cohort=()"
+        # Do not advertise the reverse proxy implementation.
+        -Server
+    }
+
+    # API Reverse Proxy to Go Backend
+    handle /api/* {
+        reverse_proxy 127.0.0.1:8080
+    }
+
+    # Static Frontend Root (React / Vite build output)
+    root * /usr/share/nginx/html
+    file_server
+    try_files {path} {path}/ /index.html
+}

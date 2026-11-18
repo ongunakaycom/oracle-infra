@@ -20,8 +20,8 @@ Terraform provisions and protects the OCI resources, GitHub Actions validates th
                               └─► npm ci && npm run build
                                         │
                                         └── ssh + rsync ──► VM.Standard.E2.1.Micro
-                                                              └─ Nginx web root
-                                                                 /usr/share/nginx/html
+                                                              └─ Caddy (TLS + security headers)
+                                                                 web root: /usr/share/nginx/html
 
  Terraform state ──► OCI Object Storage (S3-compatible backend, native lockfile)
 ```
@@ -46,8 +46,10 @@ Terraform provisions and protects the OCI resources, GitHub Actions validates th
 | `provider.tf` | Terraform/OCI provider configuration and S3-compatible remote backend |
 | `variables.tf` | Input variables for OCI identifiers, network and access control |
 | `instance.tf` | Always Free compute instance with `prevent_destroy` and `ignore_changes` guards |
-| `security.tf` | NSG and ingress rules for HTTP, HTTPS and internal SSH |
+| `security.tf` | NSG, ingress rules for HTTP/HTTPS/internal SSH, and a plan-time check for public SSH in Security Lists |
 | `bastion.tf` | OCI Bastion Service used for administrative tunneling |
+| `backend/` | Go SecOps API (JWT auth, audit log, login rate limiting) and its `Caddyfile` edge config |
+| `docs/security-remediation.md` | Runbook for the DAST/network audit findings (SSH, headers, rate limiting) |
 | `outputs.tf` | Public and private IP outputs |
 | `terraform.tfvars.example` | Template for the required variable values |
 | `.github/workflows/deploy.yml` | CI/CD pipeline |
@@ -76,6 +78,11 @@ Terraform provisions and protects the OCI resources, GitHub Actions validates th
 | INGRESS | TCP | 22 | `10.0.0.0/16` (VCN) | SSH, reachable only through the bastion |
 
 Public SSH is intentionally not exposed.
+
+> NSG rules are **additive** with the subnet's Security Lists: a Security List
+> rule allowing `0.0.0.0/0 → 22` re-opens SSH no matter what the NSG says.
+> `terraform plan` now prints a warning when such a rule is attached to the
+> subnet; see `docs/security-remediation.md` for the removal procedure.
 
 ### Bastion (`bastion.tf`)
 
@@ -186,12 +193,15 @@ It is generated, not committed.
 4. Write `secrets.SSH_PRIVATE_KEY` to a temp key, add the host key to `known_hosts`
 5. Prepare remote directories: `/usr/share/nginx/html`, `/home/opc/secops-api`, `/opt/secops`
 6. `rsync -avz --delete frontend/dist/ opc@<host>:/usr/share/nginx/html/`
-7. `rsync` the API binary and systemd unit to the host
+7. `rsync` the API binary, systemd unit and `backend/Caddyfile` to the host
 8. Render `/etc/secops/secops.env` (mode `600`, root-owned) from repository secrets only —
-   no credential is ever stored in the repository
+   no credential is ever stored in the repository and the deploy fails fast if a secret is
+   missing
 9. Install the binary in `/opt/secops` (outside `/home`, so systemd may execute it under
    SELinux), refresh contexts with `restorecon`
-10. `systemctl daemon-reload && systemctl restart secops-api`
+10. Validate the new Caddyfile with `caddy validate`, back up the previous one and reload the
+    edge proxy
+11. `systemctl daemon-reload && systemctl restart secops-api`
 11. Verify the deployment: print `systemctl status` and the last journal lines, then probe
     `http://127.0.0.1:8080/api/health`. **The job fails if the service does not answer**, so
     a broken release can no longer hide behind a `502` from the reverse proxy.
@@ -222,11 +232,20 @@ gh variable get REMOTE_HOST   # verify
 ## Security posture
 
 - No secrets, private keys, state files or `*.tfvars` in version control.
-- Public SSH is not exposed; administration goes through OCI Bastion.
+- Public SSH is not exposed; administration goes through OCI Bastion. The plan
+  warns if a subnet Security List re-opens port 22 to the internet.
+- Security headers (HSTS, CSP, Permissions-Policy, `X-Frame-Options: DENY`,
+  `nosniff`, COOP/CORP) are defined in `backend/Caddyfile` and applied by the
+  deployed edge proxy.
+- `/api/login` throttles failed attempts per client IP (5 per 15 minutes,
+  `429` + `Retry-After`) and compares credential digests in constant time.
 - The instance is protected against accidental destroy/recreate.
 - The pipeline receives only a deploy key, not OCI API credentials, so a compromised
   workflow cannot modify infrastructure.
 - Checkov runs on every change; its output should be reviewed even when `soft_fail` is on.
+
+See [`docs/security-remediation.md`](docs/security-remediation.md) for the audit
+findings, live-tenant runbook and verification commands.
 
 ---
 
@@ -238,6 +257,12 @@ gh variable get REMOTE_HOST   # verify
 - [ ] `.gitignore` contains a stray `Y` line and ignores all `*.py` files, which also hides
       the helper scripts in the repository root.
 - [ ] Checkov runs with `soft_fail: true`; switch to blocking mode once findings are clean.
+- [ ] Remove the public `22/tcp` ingress rule from the subnet's Security List on the live
+      tenant (Terraform only warns; see `docs/security-remediation.md`).
+- [ ] Login rate-limit counters are in-memory; move them to a shared store if the API is
+      ever scaled beyond one instance.
+- [ ] CSP still allows inline styles (`style-src 'unsafe-inline'`) because React components
+      use inline `style` attributes; migrate those to CSS classes, then tighten the policy.
 - [ ] Legacy helpers (`add_key.py`, `extract_key.py`, `fix_and_connect.py`,
       `update_infra.py`) and the repository-root `index.html` are unused by the pipeline
       and can be removed.
@@ -251,7 +276,7 @@ gh variable get REMOTE_HOST   # verify
 | `terraform init` fails on the backend | Wrong bucket, endpoint or region in `provider.tf`; check OCI customer secret keys and bucket name |
 | `terraform apply` refuses to replace the instance | Expected: `prevent_destroy` is enabled. Change the lifecycle block intentionally if a recreate is truly required |
 | Deploy step fails on `rsync` | Missing `SSH_PRIVATE_KEY`, `REMOTE_HOST` variable unset/wrong, or the key is not authorised for `opc` |
-| Website shows old content after deploy | `rsync --delete` runs on `/usr/share/nginx/html`; confirm the workflow completed and Nginx serves that root |
+| Website shows old content after deploy | `rsync --delete` runs on `/usr/share/nginx/html`; confirm the workflow completed and Caddy serves that root |
 | SSH from your machine times out | Port 22 is only open from the VCN CIDR; connect through the OCI Bastion session instead |
 
 ---
