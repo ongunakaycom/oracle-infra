@@ -26,11 +26,13 @@ Terraform provisions and protects the OCI resources, GitHub Actions validates th
                               ├─► terraform fmt / init / validate
                               ├─► Trivy + KICS IaC scans
                               ├─► OPA/Rego Always Free policy gate
-                              └─► npm ci && npm run build
+                              ├─► hardened build + CycloneDX SBOMs
+                              └─► cosign sign-blob (keyless OIDC)
                                         │
-                                        └── ssh + rsync ──► VM.Standard.E2.1.Micro
-                                                              └─ Caddy (TLS + security headers)
-                                                                 web root: /usr/share/nginx/html
+                                        └── signed release bundle ──► VM.Standard.E2.1.Micro
+                                                                      ├─ cosign verify-blob (fail = no deploy)
+                                                                      └─ Caddy (TLS + security headers)
+                                                                         web root: /usr/share/nginx/html
 
  Terraform state ──► OCI Object Storage (S3-compatible backend, native lockfile)
 ```
@@ -224,24 +226,35 @@ Run the free-tier gate locally before pushing:
 conftest test --combine --parser hcl2 --policy policies $(find . -maxdepth 1 -name '*.tf')
 ```
 
-**Job 3 — Build & deploy frontend & Go API** (push to `main`/`master` only)
+**Job 3 — Build, attest & deploy (Layer 4)** (push to `main`/`master` only)
 
 1. Checkout, Node.js 20 with npm cache (`frontend/package-lock.json`)
 2. `npm ci && npm run build` in `frontend/`
-3. Build the Go API: `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o secops-api main.go`
-4. Write `secrets.SSH_PRIVATE_KEY` to a temp key, add the host key to `known_hosts`
-5. Prepare remote directories: `/usr/share/nginx/html`, `/home/opc/secops-api`, `/opt/secops`
-6. `rsync -avz --delete frontend/dist/ opc@<host>:/usr/share/nginx/html/`
-7. `rsync` the API binary, systemd unit and `backend/Caddyfile` to the host
-8. Render `/etc/secops/secops.env` (mode `600`, root-owned) from repository secrets only —
-   no credential is ever stored in the repository and the deploy fails fast if a secret is
-   missing
-9. Install the binary in `/opt/secops` (outside `/home`, so systemd may execute it under
-   SELinux), refresh contexts with `restorecon`
-10. Validate the new Caddyfile with `caddy validate`, back up the previous one and reload the
+3. Frontend SBOM: `@cyclonedx/cyclonedx-npm --omit dev` → `sbom-frontend.json`
+4. Go 1.26.11; `go vet` + `go test -race`, then a hardened build:
+   `CGO_ENABLED=0 -trimpath -ldflags="-s -w -buildid="`
+5. Backend SBOM: `cyclonedx-gomod mod` → `sbom-backend.json`
+6. Assemble `release-bundle.tar.gz` (frontend dist, API binary, systemd unit, Caddyfile)
+   plus its `sha256` checksum
+7. Keyless signing with Cosign (Sigstore OIDC, `id-token: write`):
+   `cosign sign-blob --bundle release-bundle.tar.gz.sigstore.json`
+8. Upload the SBOMs and the signature as the `layer4-release-evidence` Actions artifact
+9. Transfer the bundle, checksum and Sigstore bundle to `~/releases` on the host
+10. **On the server, before anything is installed:** `sha256sum -c`, then
+    `cosign verify-blob` pinned to this workflow identity
+    (`…/deploy.yml@refs/heads/main`) and to the GitHub OIDC issuer. A failed
+    verification aborts the deploy, so unsigned or tampered artifacts never reach
+    production.
+11. Render `/etc/secops/secops.env` (mode `600`, root-owned) from repository secrets only —
+    no credential is ever stored in the repository and the deploy fails fast if a secret is
+    missing
+12. Extract the verified bundle, install the binary in `/opt/secops` (outside `/home`, so
+    systemd may execute it under SELinux), publish the frontend and refresh contexts with
+    `restorecon`
+13. Validate the new Caddyfile with `caddy validate`, back up the previous one and reload the
     edge proxy
-11. `systemctl daemon-reload && systemctl restart secops-api`
-11. Verify the deployment: print `systemctl status` and the last journal lines, then probe
+14. `systemctl daemon-reload && systemctl restart secops-api`
+15. Verify the deployment: print `systemctl status` and the last journal lines, then probe
     `http://127.0.0.1:8080/api/health`. **The job fails if the service does not answer**, so
     a broken release can no longer hide behind a `502` from the reverse proxy.
 
@@ -285,6 +298,13 @@ gh variable get REMOTE_HOST   # verify
   free-tier gate run as hard gates in the Layer 3 job.
 - Dependabot keeps GitHub Actions, npm and Go modules patched (supply-chain
   integrity for the pipeline itself).
+- Layer 4: the release bundle is built from a hardened Go binary
+  (`-trimpath`, stripped, empty build ID), accompanied by CycloneDX SBOMs and
+  signed keylessly with Cosign. The server verifies checksum **and** signature
+  against this workflow's OIDC identity before installing anything, so a
+  compromised runner without OIDC cannot push an unsigned binary.
+- Commits are SSH-signed (ED25519) and changes reach `main` only through a
+  pull request that passes the security workflows.
 
 See [`docs/security-remediation.md`](docs/security-remediation.md) for the audit
 findings, live-tenant runbook and verification commands.
