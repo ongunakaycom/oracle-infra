@@ -123,19 +123,21 @@ jobs:
 
       - name: Enforce OCI Always Free Policy Gate (OPA/Rego)
         run: |
-          conftest test --combine --parser hcl2 --policy policies \
+          conftest test --no-color --combine --parser hcl2 --policy policies \
             $(find . -maxdepth 1 -name '*.tf' -print)
 
       # Politika sessizce "her seyi gecti" durumuna dusmesin diye negatif
       # fixture uzerinde FAIL uretmesi zorunlu tutulur.
       - name: Self-test Always Free Policy Gate (must detect violations)
+        env:
+          NO_COLOR: '1'
         run: |
           set +e
-          output=$(conftest test --combine --parser hcl2 --policy policies policies/testdata/bad 2>&1)
+          output=$(conftest test --no-color --combine --parser hcl2 --policy policies policies/testdata/bad 2>&1)
           status=$?
           set -e
           printf '%s\n' "$output"
-          if [ "$status" -eq 0 ] || ! printf '%s\n' "$output" | grep -q '^FAIL'; then
+          if [ "$status" -eq 0 ] || ! printf '%s\n' "$output" | grep -q 'FAIL'; then
             echo "::error::Always Free policy self-test failed: fixture violations in policies/testdata/bad were not reported."
             exit 1
           fi
