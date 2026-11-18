@@ -34,7 +34,7 @@ function App() {
       try {
         const res = await fetch('/api/health', { cache: 'no-store' });
         if (active) setEdgeOnline(res.ok);
-      } catch (err) {
+      } catch {
         if (active) setEdgeOnline(false);
       }
     };
@@ -90,7 +90,7 @@ function App() {
         if (active) {
           setMetrics({ ...data, latency: Math.round(performance.now() - start) });
         }
-      } catch (err) {
+      } catch {
         // Keep the previous reading; the next poll will retry.
       }
     };
@@ -104,7 +104,11 @@ function App() {
   }, [token, logout]);
 
   useEffect(() => {
-    if (token) fetchRecords();
+    if (!token) return undefined;
+    // Deferred to a macrotask so the effect body performs no synchronous state
+    // update, which React 19's react-hooks/set-state-in-effect rule forbids.
+    const timer = setTimeout(fetchRecords, 0);
+    return () => clearTimeout(timer);
   }, [token, fetchRecords]);
 
   const handleLogin = async (e) => {
@@ -131,7 +135,7 @@ function App() {
       } else {
         setLoginError('Authentication is temporarily unavailable.');
       }
-    } catch (err) {
+    } catch {
       setLoginError('Authentication service unreachable.');
     } finally {
       setAuthenticating(false);
@@ -162,7 +166,7 @@ function App() {
       } else {
         setRecordError('The audit entry could not be stored.');
       }
-    } catch (err) {
+    } catch {
       setRecordError('The audit entry could not be stored.');
     }
   };
