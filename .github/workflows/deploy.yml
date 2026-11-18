@@ -41,10 +41,14 @@ jobs:
           soft_fail: true
 
   deploy-static-content:
-    name: Build & Deploy React Frontend & Go API
+    name: Build, Attest & Deploy React Frontend & Go API (Layer 4)
     needs: terraform-validate-and-security
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write # Sigstore keyless (OIDC) imzalama icin zorunlu
 
     steps:
       - name: Checkout Repository
@@ -63,10 +67,23 @@ jobs:
           npm ci
           npm run build
 
+      # ---------------------------------------------------------------------
+      # Layer 4 - Supply chain: SBOM (CycloneDX) + keyless Cosign attestation
+      # ---------------------------------------------------------------------
+      - name: Generate Frontend SBOM (CycloneDX, production deps only)
+        working-directory: ./frontend
+        run: |
+          npx --yes @cyclonedx/cyclonedx-npm@7.0.1 \
+            --omit dev \
+            --output-format json \
+            --output-file ../sbom-frontend.json
+          jq -r '."bomFormat", .specVersion, (.components | length)' ../sbom-frontend.json
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version: '1.26.11'
+          cache-dependency-path: '**/go.sum'
 
       - name: Test Go SecOps API
         working-directory: ./backend
@@ -75,27 +92,62 @@ jobs:
           go vet ./...
           go test -v -race ./...
 
-      - name: Build Go SecOps API Binary
+      - name: Build Hardened Go SecOps API Binary
         working-directory: ./backend
         run: |
           go get modernc.org/sqlite@v1.28.0
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o secops-api main.go
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -trimpath -ldflags="-s -w -buildid=" -o secops-api .
 
-      - name: Deploy Artifacts to OCI Instance
+      - name: Generate Backend SBOM (CycloneDX)
+        working-directory: ./backend
+        run: |
+          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.12.0
+          cyclonedx-gomod mod -json -output ../sbom-backend.json
+          jq -r '."bomFormat", .specVersion, (.components | length)' ../sbom-backend.json
+
+      - name: Assemble Release Bundle
+        run: |
+          rm -rf release
+          mkdir -p release/frontend-dist
+          cp -a frontend/dist/. release/frontend-dist/
+          cp backend/secops-api backend/secops-api.service backend/Caddyfile release/
+          tar -czf release-bundle.tar.gz -C release .
+          sha256sum release-bundle.tar.gz | tee release-bundle.tar.gz.sha256
+          tar -tzf release-bundle.tar.gz
+
+      - name: Install Cosign (pinned, same version as the server)
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.4.3'
+
+      - name: Sign Release Bundle (keyless Sigstore)
+        run: |
+          cosign sign-blob --yes \
+            --bundle release-bundle.tar.gz.sigstore.json \
+            release-bundle.tar.gz
+          ls -l release-bundle.tar.gz release-bundle.tar.gz.sigstore.json
+
+      - name: Upload Release Evidence (SBOM + signature)
+        uses: actions/upload-artifact@v4
+        with:
+          name: layer4-release-evidence
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            sbom-frontend.json
+            sbom-backend.json
+            release-bundle.tar.gz
+            release-bundle.tar.gz.sha256
+            release-bundle.tar.gz.sigstore.json
+
+      - name: Prepare Deploy Credentials
         env:
           SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
           REMOTE_HOST: ${{ vars.REMOTE_HOST }}
-          REMOTE_USER: "opc"
-          SECOPS_ADMIN_USER: ${{ secrets.SECOPS_ADMIN_USER }}
-          SECOPS_ADMIN_PASS: ${{ secrets.SECOPS_ADMIN_PASS }}
-          SECOPS_JWT_SECRET: ${{ secrets.SECOPS_JWT_SECRET }}
         run: |
           if [ -z "$REMOTE_HOST" ]; then
             echo "::error::Repository variable REMOTE_HOST is not set"
-            exit 1
-          fi
-          if [ -z "$SECOPS_ADMIN_USER" ] || [ -z "$SECOPS_ADMIN_PASS" ] || [ -z "$SECOPS_JWT_SECRET" ]; then
-            echo "::error::SECOPS_ADMIN_USER, SECOPS_ADMIN_PASS and SECOPS_JWT_SECRET repository secrets must be set"
             exit 1
           fi
           mkdir -p ~/.ssh
@@ -103,14 +155,29 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H "$REMOTE_HOST" >> ~/.ssh/known_hosts
 
-          # Sunucu hedef klasörlerini hazırla
-          ssh -i ~/.ssh/deploy_key "$REMOTE_USER@$REMOTE_HOST" "sudo mkdir -p /usr/share/nginx/html /home/opc/secops-api /opt/secops /etc/secops && sudo chown -R $REMOTE_USER:$REMOTE_USER /usr/share/nginx/html /home/opc/secops-api /opt/secops"
+      - name: Transfer Signed Release to OCI Instance
+        env:
+          REMOTE_HOST: ${{ vars.REMOTE_HOST }}
+          REMOTE_USER: "opc"
+        run: |
+          ssh -i ~/.ssh/deploy_key "$REMOTE_USER@$REMOTE_HOST" \
+            "mkdir -p ~/releases && sudo mkdir -p /usr/share/nginx/html /opt/secops /etc/secops && sudo chown -R $REMOTE_USER:$REMOTE_USER /usr/share/nginx/html"
+          rsync -avz -e "ssh -i ~/.ssh/deploy_key" \
+            release-bundle.tar.gz release-bundle.tar.gz.sha256 release-bundle.tar.gz.sigstore.json \
+            "$REMOTE_USER@$REMOTE_HOST:~/releases/"
 
-          # Vite dist/ çıktısını senkronize et
-          rsync -avz --delete -e "ssh -i ~/.ssh/deploy_key" frontend/dist/ "$REMOTE_USER@$REMOTE_HOST:/usr/share/nginx/html/"
-
-          # Go binary, systemd unit ve Caddy edge yapılandırmasını sunucuya kopyala
-          rsync -avz -e "ssh -i ~/.ssh/deploy_key" backend/secops-api backend/secops-api.service backend/Caddyfile "$REMOTE_USER@$REMOTE_HOST:/home/opc/secops-api/"
+      - name: Deploy (verify signature, then install and restart)
+        env:
+          REMOTE_HOST: ${{ vars.REMOTE_HOST }}
+          REMOTE_USER: "opc"
+          SECOPS_ADMIN_USER: ${{ secrets.SECOPS_ADMIN_USER }}
+          SECOPS_ADMIN_PASS: ${{ secrets.SECOPS_ADMIN_PASS }}
+          SECOPS_JWT_SECRET: ${{ secrets.SECOPS_JWT_SECRET }}
+        run: |
+          if [ -z "$SECOPS_ADMIN_USER" ] || [ -z "$SECOPS_ADMIN_PASS" ] || [ -z "$SECOPS_JWT_SECRET" ]; then
+            echo "::error::SECOPS_ADMIN_USER, SECOPS_ADMIN_PASS and SECOPS_JWT_SECRET repository secrets must be set"
+            exit 1
+          fi
 
           # Ortam dosyasını yalnızca repository secret'larından üret (600, root)
           ENV_PAYLOAD=$(printf 'SECOPS_ADMIN_USER=%s\nSECOPS_ADMIN_PASS=%s\nSECOPS_JWT_SECRET=%s\n' \
@@ -118,21 +185,50 @@ jobs:
           printf '%s' "$ENV_PAYLOAD" | ssh -i ~/.ssh/deploy_key "$REMOTE_USER@$REMOTE_HOST" \
             "umask 077 && sudo install -d -m 0700 -o root -g root /etc/secops && base64 -d | sudo tee /etc/secops/secops.env >/dev/null && sudo chown root:root /etc/secops/secops.env && sudo chmod 600 /etc/secops/secops.env"
 
-          # Binary'yi SELinux'un systemd için izin verdiği /opt/secops altına kur, servisi başlat ve doğrula
-          ssh -i ~/.ssh/deploy_key "$REMOTE_USER@$REMOTE_HOST" bash -s <<'REMOTE'
+          # Sigstore kimliği: bu workflow, bu branch
+          ssh -i ~/.ssh/deploy_key "$REMOTE_USER@$REMOTE_HOST" \
+            "CERT_IDENTITY='https://github.com/${GITHUB_REPOSITORY}/.github/workflows/deploy.yml@refs/heads/${GITHUB_REF_NAME}' bash -s" <<'REMOTE'
           set -euo pipefail
+
+          cd "$HOME/releases"
+
+          echo "--- Release bundle checksum ---"
+          sha256sum -c release-bundle.tar.gz.sha256
+
+          if ! command -v cosign >/dev/null 2>&1; then
+            echo "--- Installing cosign v2.4.3 ---"
+            curl -sSfL -o /tmp/cosign \
+              "https://github.com/sigstore/cosign/releases/download/v2.4.3/cosign-linux-amd64"
+            sudo install -m 0755 /tmp/cosign /usr/local/bin/cosign
+          fi
+
+          echo "--- Verifying Sigstore signature (keyless OIDC) ---"
+          cosign verify-blob \
+            --bundle release-bundle.tar.gz.sigstore.json \
+            --certificate-identity "$CERT_IDENTITY" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            release-bundle.tar.gz
+
+          echo "--- Extracting verified bundle ---"
+          rm -rf staging
+          mkdir -p staging
+          tar -xzf release-bundle.tar.gz -C staging
+          test -x staging/secops-api
 
           # Eski konumdaki SQLite veritabanını koru
           if [ -f /home/opc/secops-api/secops.db ] && [ ! -f /opt/secops/secops.db ]; then
             sudo mv /home/opc/secops-api/secops.db /opt/secops/secops.db
           fi
 
-          sudo install -o opc -g opc -m 0755 /home/opc/secops-api/secops-api /opt/secops/secops-api
-          sudo install -o root -g root -m 0644 /home/opc/secops-api/secops-api.service /etc/systemd/system/secops-api.service
+          sudo install -o opc -g opc -m 0755 staging/secops-api /opt/secops/secops-api
+          sudo install -o root -g root -m 0644 staging/secops-api.service /etc/systemd/system/secops-api.service
+
+          # Doğrulanmış paketteki statik içeriği yayına al
+          sudo rsync -a --delete staging/frontend-dist/ /usr/share/nginx/html/
 
           # Caddy: yeni yapılandırmayı doğrula, yedekle ve ancak başarılıysa devreye al
           if command -v caddy >/dev/null 2>&1 && [ -d /etc/caddy ]; then
-            sudo install -o root -g root -m 0644 /home/opc/secops-api/Caddyfile /etc/caddy/Caddyfile.next
+            sudo install -o root -g root -m 0644 staging/Caddyfile /etc/caddy/Caddyfile.next
             if sudo caddy validate --config /etc/caddy/Caddyfile.next --adapter caddyfile; then
               if [ -f /etc/caddy/Caddyfile ]; then
                 sudo cp -a /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak
@@ -169,4 +265,6 @@ jobs:
             echo "::error::secops-api is not responding on 127.0.0.1:8080"
             exit 1
           fi
+
+          rm -rf staging
           REMOTE

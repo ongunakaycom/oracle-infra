@@ -50,3 +50,13 @@ Thumbs.db
 
 # Logs
 *.log
+
+# ==========================================
+# Layer 4 - SBOM & release evidence (CI artifacts, not source)
+# ==========================================
+sbom-frontend.json
+sbom-backend.json
+release/
+release-bundle.tar.gz
+release-bundle.tar.gz.sha256
+release-bundle.tar.gz.sigstore.json
