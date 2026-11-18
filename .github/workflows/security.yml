@@ -20,7 +20,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      # --- LAYER 1: Source Code & Secret Security ---
       - name: Run Gitleaks Secret Scanner (Layer 1 - Primary)
         uses: gitleaks/gitleaks-action@v2
         env:
@@ -38,7 +37,6 @@ jobs:
           npm ci --silent
           npm run lint --if-present
 
-      # --- LAYER 2: Controlled Dependency Security (No Bot Noise) ---
       - name: Frontend npm Audit (Layer 2 - High/Critical CVEs)
         if: hashFiles('frontend/package-lock.json') != ''
         working-directory: frontend
@@ -58,14 +56,16 @@ jobs:
           govulncheck ./...
 
       - name: Snyk Deep Dependency & Zero-Day Scan (Layer 2 - Optional Token)
-        if: ${{ secrets.SNYK_TOKEN != '' && hashFiles('frontend/package.json') != '' }}
-        uses: snyk/actions/node@master
+        if: hashFiles('frontend/package.json') != ''
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          args: --file=frontend/package.json --severity-threshold=high
+        run: |
+          if [ -n "$SNYK_TOKEN" ]; then
+            npx --yes snyk test --file=frontend/package.json --severity-threshold=high
+          else
+            echo "SNYK_TOKEN tanımlı değil; Snyk adımı atlandı (npm audit & govulncheck aktif)."
+          fi
 
-      # --- IaC & DR Script Security ---
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
@@ -78,7 +78,6 @@ jobs:
           soft_fail: false
 
       - name: ShellCheck & Bash Syntax Audit (DR Scripts)
-        if: hashFiles('scripts/*.sh') != ''
         run: |
           bash -n scripts/*.sh
           shellcheck scripts/*.sh
