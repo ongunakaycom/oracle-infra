@@ -1,18 +1,20 @@
 # Oracle Cloud (OCI) DevOps Infrastructure
 
 [![Enterprise DevOps CI/CD Pipeline](https://github.com/ongunakaycom/oracle-infra/actions/workflows/deploy.yml/badge.svg)](https://github.com/ongunakaycom/oracle-infra/actions/workflows/deploy.yml)
-[![IaC Security: Trivy + KICS + OPA](https://img.shields.io/badge/Security-Trivy%20%2B%20KICS%20%2B%20OPA-brightgreen?logo=opensourceinitiative&logoColor=white)](.github/workflows/security.yml)
+[![DevSecOps Security Scan](https://github.com/ongunakaycom/oracle-infra/actions/workflows/security.yml/badge.svg)](https://github.com/ongunakaycom/oracle-infra/actions/workflows/security.yml)
+[![IaC Security: Trivy + KICS + OPA](https://img.shields.io/badge/IaC-Trivy%20%2B%20KICS%20%2B%20OPA-brightgreen)](.github/workflows/security.yml)
+[![Supply chain: SBOM + Cosign](https://img.shields.io/badge/Supply%20chain-CycloneDX%20%2B%20Cosign-blueviolet)](.github/workflows/deploy.yml)
 [![Terraform Version](https://img.shields.io/badge/Terraform-%3E%3D1.10.0-623CE4?logo=terraform&logoColor=white)](https://www.terraform.io)
-[![Go Version](https://img.shields.io/badge/Go-1.23-00ADD8?logo=go&logoColor=white)](https://golang.org)
+[![Go Version](https://img.shields.io/badge/Go-1.26.11-00ADD8?logo=go&logoColor=white)](https://golang.org)
 [![React Version](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev)
 [![Vite Version](https://img.shields.io/badge/Vite-8-646CFF?logo=vite&logoColor=white)](https://vite.dev)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Production-oriented infrastructure-as-code and CI/CD setup for a **React + Vite** frontend and **Go (SQLite)** backend hosted on an **Oracle Cloud Infrastructure Always Free** compute instance, protected by OCI Bastion, Caddy edge security headers, and automated vulnerability scanning.
+Production-oriented infrastructure-as-code and CI/CD setup for a **React + Vite** frontend and **Go (SQLite)** backend hosted on an **Oracle Cloud Infrastructure Always Free** compute instance, protected by OCI Bastion, Caddy edge security headers, and a signed, SBOM-backed release pipeline.
 
 **Live URL:** https://oracle-infra.duckdns.org/ *(DNS via DuckDNS)*
 
-Terraform provisions and protects the OCI resources, GitHub Actions validates the infrastructure and deploys every frontend build to the server over SSH/rsync.
+Terraform provisions and protects the OCI resources; GitHub Actions validates the infrastructure, builds a hardened artifact, signs it keylessly with Sigstore, and only then deploys the verified bundle to the server over SSH.
 
 ---
 
@@ -46,7 +48,10 @@ Terraform provisions and protects the OCI resources, GitHub Actions validates th
 | DNS / Demo URL | DuckDNS — `https://oracle-infra.duckdns.org/` (maps to instance IP) |
 | Admin access | OCI Bastion Service (no public SSH) |
 | Frontend | React 19 + Vite 8 + ESLint 10 |
-| CI/CD | GitHub Actions (validate, security scan, build, rsync deploy) |
+| IaC security | Trivy `config` + Checkmarx KICS + OPA/Rego Always Free gate (Conftest) |
+| Supply chain | CycloneDX SBOMs, keyless Cosign (`sign-blob`/`verify-blob`), Dependabot |
+| Runtime | Go 1.26.11 (hardened build), systemd, Caddy, SQLite |
+| CI/CD | GitHub Actions (validate, scan, build, sign, verify, deploy) |
 
 ---
 
@@ -66,10 +71,14 @@ Terraform provisions and protects the OCI resources, GitHub Actions validates th
 | `docs/security-remediation.md` | Runbook for the DAST/network audit findings (SSH, headers, rate limiting) |
 | `outputs.tf` | Public and private IP outputs |
 | `terraform.tfvars.example` | Template for the required variable values |
-| `.github/workflows/deploy.yml` | CI/CD pipeline |
+| `.github/workflows/deploy.yml` | Validate + build, SBOM, sign, verify and deploy (Layer 4) |
+| `.github/workflows/security.yml` | Secrets, dependency, IaC and Always Free gates (Layers 1–3) |
+| `.github/dependabot.yml` | Weekly updates for Actions, npm and Go modules |
 | `frontend/` | React + Vite application that is built and deployed |
 
-> The `.tf`, `.py` and `index.html` files in the repository root are part of the infrastructure layer; the deployed website is built from `frontend/`.
+> The deployed website is built from `frontend/`; the Terraform root files are the
+> infrastructure layer. Generated evidence (`sbom-*.json`, `release/`,
+> `release-bundle.tar.gz*`) is ignored by Git and lives only in CI artifacts.
 
 ---
 
@@ -102,7 +111,7 @@ Public SSH is intentionally not exposed.
 
 A `STANDARD` OCI Bastion is attached to the target subnet. Which client networks may
 connect is controlled by `bastion_allowed_cidrs`. The default is the operator's current
-egress IP (`83.52.157.115/32`); update it whenever that IP changes, and never widen it to
+egress IP (`89.168.99.211/32`); update it whenever that IP changes, and never widen it to
 `0.0.0.0/0` in production.
 
 ### Remote state
@@ -125,6 +134,14 @@ Never commit `*.tfstate`, `*.tfvars` or private keys. They are already covered b
 - OCI identifiers: tenancy OCID, user OCID, API key fingerprint, compartment OCID,
   availability domain, subnet OCID, VCN OCID
 - Node.js 20+ and npm (for the frontend)
+- Go 1.26.11 (for the backend)
+
+Optional, for reproducing the CI gates locally:
+
+- [Conftest](https://www.conftest.dev/install/) (OPA/Rego policy gate)
+- [Trivy](https://trivy.dev/latest/getting-started/installation/) (`trivy config .`)
+- [Cosign](https://docs.sigstore.dev/cosign/system_config/installation/) (signature
+  verification, same major version as the server)
 
 ---
 
@@ -145,6 +162,21 @@ terraform plan
 
 # 4. Apply (only when the plan is expected)
 terraform apply
+```
+
+### Local security checks
+
+Run the same gates as CI before opening a PR:
+
+```bash
+terraform fmt -check
+terraform validate
+
+# OCI Always Free policy gate (no cloud credentials required)
+conftest test --combine --parser hcl2 --policy policies $(find . -maxdepth 1 -name '*.tf')
+
+# IaC scan (Trivy picks the Terraform files up from the repository root)
+trivy config --severity HIGH,CRITICAL --exit-code 1 .
 ```
 
 ### Required variables
@@ -183,26 +215,34 @@ npm run dev     # local dev server with HMR
 npm run lint    # ESLint
 npm run build   # production build -> frontend/dist
 npm run preview # preview the production build locally
+
+# Same SBOM CI publishes, limited to production dependencies
+npx --yes @cyclonedx/cyclonedx-npm@7.0.1 --omit dev --output-file ../sbom-frontend.json
 ```
 
-The build output (`frontend/dist`) is what the pipeline uploads to the server.
-It is generated, not committed.
+`frontend/dist` is generated at build time and packaged into the signed release
+bundle; it is never committed.
 
 ---
 
 ## CI/CD pipeline
 
-`.github/workflows/deploy.yml` and `.github/workflows/security.yml` run on every
-push and pull request to `main`/`master`.
+Two workflows run on every push and pull request to `main`/`master`; the deploy
+job itself only runs on pushes.
 
-**Job 1 — Terraform validate & security scan** (all events)
+### `security.yml` — Layers 1–3
 
-1. `terraform fmt -check`
-2. `terraform init -backend=false`
-3. `terraform validate`
-4. Checkov Terraform scan (`soft_fail: true`, findings are reported but do not block)
+**`security-audit` (Layer 1 & 2)**
 
-**Job 2 — Terraform security & Always Free guard** (`security.yml`, all events)
+1. Gitleaks secret scan (primary, uses `GITHUB_TOKEN`)
+2. TruffleHog verified-secret scan (secondary)
+3. Frontend ESLint
+4. `npm audit --omit=dev --audit-level=high` as a hard gate (full tree reported)
+5. `govulncheck` on Go 1.26.11
+6. Snyk deep dependency scan (skipped when `SNYK_TOKEN` is not configured)
+7. `bash -n` + ShellCheck for the DR scripts
+
+**`terraform-security` (Layer 3)**
 
 1. **Trivy** `config` scan of the Terraform root (successor of tfsec, which
    received its last rule updates before being merged into Trivy); fails on
@@ -217,28 +257,37 @@ push and pull request to `main`/`master`.
    policy gate is what protects the free tier — together with the
    `oci_budget_budget` alert defined in `budget.tf`.
 4. A self-test runs the same policy against `policies/testdata/bad/` and fails
-   the job if the violations there are not reported, so the gate cannot
-   silently degrade into a no-op.
+   the job if the violations there are not reported (Conftest colours its
+   output, hence `--no-color`), so the gate cannot silently become a no-op.
 
 Run the free-tier gate locally before pushing:
 
 ```bash
-conftest test --combine --parser hcl2 --policy policies $(find . -maxdepth 1 -name '*.tf')
+conftest test --no-color --combine --parser hcl2 --policy policies $(find . -maxdepth 1 -name '*.tf')
 ```
 
-**Job 3 — Build, attest & deploy (Layer 4)** (push to `main`/`master` only)
+### `deploy.yml` — Terraform validation & Layer 4
+
+**`terraform-validate-and-security`** (all events)
+
+1. `terraform fmt -check`
+2. `terraform init -backend=false`
+3. `terraform validate`
+4. Checkov Terraform scan (`soft_fail: true`, findings are reported but do not block)
+
+**`deploy-static-content`** (push to `main`/`master` only)
 
 1. Checkout, Node.js 20 with npm cache (`frontend/package-lock.json`)
 2. `npm ci && npm run build` in `frontend/`
-3. Frontend SBOM: `@cyclonedx/cyclonedx-npm --omit dev` → `sbom-frontend.json`
+3. Frontend SBOM: `@cyclonedx/cyclonedx-npm@7.0.1 --omit dev` → `sbom-frontend.json`
 4. Go 1.26.11; `go vet` + `go test -race`, then a hardened build:
    `CGO_ENABLED=0 -trimpath -ldflags="-s -w -buildid="`
-5. Backend SBOM: `cyclonedx-gomod mod` → `sbom-backend.json`
+5. Backend SBOM: `cyclonedx-gomod@v1.12.0 mod` → `sbom-backend.json`
 6. Assemble `release-bundle.tar.gz` (frontend dist, API binary, systemd unit, Caddyfile)
    plus its `sha256` checksum
-7. Keyless signing with Cosign (Sigstore OIDC, `id-token: write`):
+7. Keyless signing with Cosign v2.4.3 (Sigstore OIDC, `id-token: write`):
    `cosign sign-blob --bundle release-bundle.tar.gz.sigstore.json`
-8. Upload the SBOMs and the signature as the `layer4-release-evidence` Actions artifact
+8. Upload the SBOMs, bundle and signature as the `layer4-release-evidence` artifact
 9. Transfer the bundle, checksum and Sigstore bundle to `~/releases` on the host
 10. **On the server, before anything is installed:** `sha256sum -c`, then
     `cosign verify-blob` pinned to this workflow identity
@@ -258,6 +307,29 @@ conftest test --combine --parser hcl2 --policy policies $(find . -maxdepth 1 -na
     `http://127.0.0.1:8080/api/health`. **The job fails if the service does not answer**, so
     a broken release can no longer hide behind a `502` from the reverse proxy.
 
+#### Release evidence and manual verification
+
+Every successful deploy leaves a `layer4-release-evidence` artifact (30-day
+retention) containing both SBOMs, the release bundle, its checksum and the
+Sigstore bundle. Verify a downloaded artifact exactly like the server does:
+
+```bash
+gh run download --name layer4-release-evidence --dir evidence
+cd evidence
+
+sha256sum -c release-bundle.tar.gz.sha256
+
+cosign verify-blob \
+  --bundle release-bundle.tar.gz.sigstore.json \
+  --certificate-identity "https://github.com/ongunakaycom/oracle-infra/.github/workflows/deploy.yml@refs/heads/main" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  release-bundle.tar.gz
+# => Verified OK
+```
+
+The OCI host installs `cosign` v2.4.3 on first use and performs the same check
+before touching `/opt/secops` or `/usr/share/nginx/html`.
+
 ### Required GitHub configuration
 
 | Name | Type | Purpose |
@@ -271,6 +343,11 @@ conftest test --combine --parser hcl2 --policy policies $(find . -maxdepth 1 -na
 The deploy host is read from the `REMOTE_HOST` repository variable, so an IP change only
 requires updating the variable — no code change. The job fails fast with an explicit error
 if any of the values above is empty.
+
+The deploy job also requests `id-token: write`: it exchanges that short-lived OIDC token for
+a Sigstore certificate when signing the release bundle. No long-lived signing key is stored
+in the repository — GitHub's OIDC provider must simply be available to Actions (the default
+when Actions is enabled).
 
 Set it from the CLI:
 
@@ -292,8 +369,8 @@ gh variable get REMOTE_HOST   # verify
 - `/api/login` throttles failed attempts per client IP (5 per 15 minutes,
   `429` + `Retry-After`) and compares credential digests in constant time.
 - The instance is protected against accidental destroy/recreate.
-- The pipeline receives only a deploy key, not OCI API credentials, so a compromised
-  workflow cannot modify infrastructure.
+- The pipeline receives a deploy key and a short-lived OIDC token, but no OCI API
+  credentials, so a compromised workflow cannot modify infrastructure.
 - Checkov runs on every change (`soft_fail: true`); Trivy, KICS and the OPA
   free-tier gate run as hard gates in the Layer 3 job.
 - Dependabot keeps GitHub Actions, npm and Go modules patched (supply-chain
@@ -314,10 +391,17 @@ findings, live-tenant runbook and verification commands.
 ## Known gaps / next steps
 
 - [x] ~~The deploy host is hardcoded in the workflow~~ — now read from `vars.REMOTE_HOST`.
-- [x] ~~`bastion_allowed_cidrs` defaults to `0.0.0.0/0`; set it to trusted ranges.~~ — restricted to operator egress IP (`83.52.157.115/32`).
+- [x] ~~`bastion_allowed_cidrs` defaults to `0.0.0.0/0`; set it to trusted ranges.~~ — restricted to operator egress IP (`89.168.99.211/32`).
 - [x] ~~`frontend/dist` is not ignored by Git; add it to `.gitignore`.~~ — added.
 - [x] ~~`.gitignore` contains a stray `Y` line and ignores all `*.py` files, which also hides the helper scripts.~~ — cleaned.
 - [x] ~~Legacy helpers (`add_key.py`, `extract_key.py`, `fix_and_connect.py`, `update_infra.py`) and the repository-root `index.html` are unused by the pipeline and can be removed.~~ — removed.
+- [x] ~~tfsec / Terrascan / Infracost were part of the planned Layer 3 stack.~~ — replaced by Trivy + KICS + an OPA Always Free gate.
+- [x] ~~Deployments trusted whatever the runner produced.~~ — the server now verifies a Cosign-signed, checksummed bundle before installing.
+- [ ] Node.js 20 is deprecated on GitHub runners (annotation only). Plan the jump to
+      Node 22/24 for `setup-node` and `@cyclonedx/cyclonedx-npm`.
+- [ ] Dependabot opened major-upgrade PRs (`actions/checkout@v7`,
+      `actions/setup-go@v6`); review and merge once the pinned Cosign/KICS
+      versions are re-checked.
 
 ---
 
@@ -328,6 +412,10 @@ findings, live-tenant runbook and verification commands.
 | `terraform init` fails on the backend | Wrong bucket, endpoint or region in `provider.tf`; check OCI customer secret keys and bucket name |
 | `terraform apply` refuses to replace the instance | Expected: `prevent_destroy` is enabled. Change the lifecycle block intentionally if a recreate is truly required |
 | Deploy step fails on `rsync` | Missing `SSH_PRIVATE_KEY`, `REMOTE_HOST` variable unset/wrong, or the key is not authorised for `opc` |
+| Deploy fails with `cosign: Error: verifying blob` | The bundle identity/issuer must match this workflow and branch; re-run the workflow from `main`. Nothing was installed — the previous release keeps serving |
+| Deploy fails while installing `cosign` on the host | The instance cannot reach `github.com`; pre-install `cosign` v2.4.3 in `/usr/local/bin` or allow outbound HTTPS |
+| `cyclonedx-gomod` / SBOM step fails | Go toolchain is older than `go.mod` (`1.26.11`) or the module cache is cold; re-run the job |
+| `conftest` self-test reports "violations were not reported" | A policy edit removed the `input[].contents` unwrapping or the `deny` rules; run the local gate command above |
 | Website shows old content after deploy | `rsync --delete` runs on `/usr/share/nginx/html`; confirm the workflow completed and Caddy serves that root |
 | SSH from your machine times out | Port 22 is only open from the VCN CIDR; connect through the OCI Bastion session instead |
 
