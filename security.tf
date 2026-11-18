@@ -88,5 +88,5 @@ locals {
 
 output "ssh_security_list_audit_warning" {
   description = "Warns if any attached subnet Security List exposes TCP/22 to 0.0.0.0/0 (see docs/security-remediation.md)"
-  value = length(local.security_lists_allowing_public_ssh) == 0 ? "OK: No subnet Security List exposes TCP/22 to 0.0.0.0/0" : "WARNING: Subnet Security List(s) exposing TCP/22 to internet: ${join(", ", local.security_lists_allowing_public_ssh)} — see docs/security-remediation.md"
+  value       = length(local.security_lists_allowing_public_ssh) == 0 ? "OK: No subnet Security List exposes TCP/22 to 0.0.0.0/0" : "WARNING: Subnet Security List(s) exposing TCP/22 to internet: ${join(", ", local.security_lists_allowing_public_ssh)} — see docs/security-remediation.md"
 }
