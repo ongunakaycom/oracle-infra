@@ -1,6 +1,14 @@
 # Oracle Cloud (OCI) DevOps Infrastructure
 
-Production-oriented infrastructure-as-code and CI/CD setup for a **React + Vite** site hosted on an **Oracle Cloud Infrastructure Always Free** compute instance.
+[![Enterprise DevOps CI/CD Pipeline](https://github.com/ongunakaycom/oracle-infra/actions/workflows/deploy.yml/badge.svg)](https://github.com/ongunakaycom/oracle-infra/actions/workflows/deploy.yml)
+[![Checkov Security Scan](https://img.shields.io/badge/Security-Checkov-brightgreen?logo=prisma&logoColor=white)](https://github.com/bridgecrewio/checkov)
+[![Terraform Version](https://img.shields.io/badge/Terraform-%3E%3D1.10.0-623CE4?logo=terraform&logoColor=white)](https://www.terraform.io)
+[![Go Version](https://img.shields.io/badge/Go-1.23-00ADD8?logo=go&logoColor=white)](https://golang.org)
+[![React Version](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev)
+[![Vite Version](https://img.shields.io/badge/Vite-8-646CFF?logo=vite&logoColor=white)](https://vite.dev)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+Production-oriented infrastructure-as-code and CI/CD setup for a **React + Vite** frontend and **Go (SQLite)** backend hosted on an **Oracle Cloud Infrastructure Always Free** compute instance, protected by OCI Bastion, Caddy edge security headers, and automated vulnerability scanning.
 
 **Live URL:** https://oracle-infra.duckdns.org/ *(DNS via DuckDNS)*
 
