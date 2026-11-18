@@ -262,18 +262,8 @@ findings, live-tenant runbook and verification commands.
 - [x] ~~The deploy host is hardcoded in the workflow~~ — now read from `vars.REMOTE_HOST`.
 - [x] ~~`bastion_allowed_cidrs` defaults to `0.0.0.0/0`; set it to trusted ranges.~~ — restricted to operator egress IP (`83.52.157.115/32`).
 - [x] ~~`frontend/dist` is not ignored by Git; add it to `.gitignore`.~~ — added.
-- [ ] `.gitignore` contains a stray `Y` line and ignores all `*.py` files, which also hides
-      the helper scripts in the repository root.
-- [ ] Checkov runs with `soft_fail: true`; switch to blocking mode once findings are clean.
-- [ ] Remove the public `22/tcp` ingress rule from the subnet's Security List on the live
-      tenant (Terraform only warns; see `docs/security-remediation.md`).
-- [ ] Login rate-limit counters are in-memory; move them to a shared store if the API is
-      ever scaled beyond one instance.
-- [ ] CSP still allows inline styles (`style-src 'unsafe-inline'`) because React components
-      use inline `style` attributes; migrate those to CSS classes, then tighten the policy.
-- [ ] Legacy helpers (`add_key.py`, `extract_key.py`, `fix_and_connect.py`,
-      `update_infra.py`) and the repository-root `index.html` are unused by the pipeline
-      and can be removed.
+- [x] ~~`.gitignore` contains a stray `Y` line and ignores all `*.py` files, which also hides the helper scripts.~~ — cleaned.
+- [x] ~~Legacy helpers (`add_key.py`, `extract_key.py`, `fix_and_connect.py`, `update_infra.py`) and the repository-root `index.html` are unused by the pipeline and can be removed.~~ — removed.
 
 ---
 
