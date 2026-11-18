@@ -37,17 +37,9 @@ oracle_key
 my_deploy_key
 test_key
 
-# NOT: .pub uzantılı public key'ler güvenlidir, ancak temizlik için hariç tutulabilir.
-# *.pub
-
 # ==========================================
 # Geçici Dosyalar & Diğer
 # ==========================================
-# Hatalı oluşturulmuş geçici dosyalar
-Y
-
-# Python scripts (varsa)
-*.py
 __pycache__/
 *.py[cod]
 *$py.class
