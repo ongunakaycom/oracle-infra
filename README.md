@@ -1,7 +1,7 @@
 # Oracle Cloud (OCI) DevOps Infrastructure
 
 [![Enterprise DevOps CI/CD Pipeline](https://github.com/ongunakaycom/oracle-infra/actions/workflows/deploy.yml/badge.svg)](https://github.com/ongunakaycom/oracle-infra/actions/workflows/deploy.yml)
-[![Checkov Security Scan](https://img.shields.io/badge/Security-Checkov-brightgreen?logo=prisma&logoColor=white)](https://github.com/bridgecrewio/checkov)
+[![IaC Security: Trivy + KICS + OPA](https://img.shields.io/badge/Security-Trivy%20%2B%20KICS%20%2B%20OPA-brightgreen?logo=opensourceinitiative&logoColor=white)](.github/workflows/security.yml)
 [![Terraform Version](https://img.shields.io/badge/Terraform-%3E%3D1.10.0-623CE4?logo=terraform&logoColor=white)](https://www.terraform.io)
 [![Go Version](https://img.shields.io/badge/Go-1.23-00ADD8?logo=go&logoColor=white)](https://golang.org)
 [![React Version](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev)
@@ -24,7 +24,8 @@ Terraform provisions and protects the OCI resources, GitHub Actions validates th
  git push  ──────────────► Actions workflow
                               │
                               ├─► terraform fmt / init / validate
-                              ├─► Checkov security scan
+                              ├─► Trivy + KICS IaC scans
+                              ├─► OPA/Rego Always Free policy gate
                               └─► npm ci && npm run build
                                         │
                                         └── ssh + rsync ──► VM.Standard.E2.1.Micro
@@ -56,6 +57,9 @@ Terraform provisions and protects the OCI resources, GitHub Actions validates th
 | `instance.tf` | Always Free compute instance with `prevent_destroy` and `ignore_changes` guards |
 | `security.tf` | NSG, ingress rules for HTTP/HTTPS/internal SSH, and a plan-time check for public SSH in Security Lists |
 | `bastion.tf` | OCI Bastion Service used for administrative tunneling |
+| `budget.tf` | `oci_budget_budget` + alert rules that fire on any non-free spend |
+| `policies/oci_free_tier.rego` | OPA/Rego gate enforcing the OCI Always Free limits in CI |
+| `policies/testdata/bad/` | Negative fixtures: the gate must reject these (CI self-test) |
 | `backend/` | Go SecOps API (JWT auth, audit log, login rate limiting) and its `Caddyfile` edge config |
 | `docs/security-remediation.md` | Runbook for the DAST/network audit findings (SSH, headers, rate limiting) |
 | `outputs.tf` | Public and private IP outputs |
@@ -156,6 +160,8 @@ terraform apply
 | `vcn_id` | yes | VCN owning the NSG |
 | `ssh_public_key` | no | Public key injected into instance metadata |
 | `bastion_allowed_cidrs` | no | CIDRs allowed to use the bastion |
+| `budget_alert_emails` | no | Recipients for budget alerts; empty list disables the budget |
+| `budget_amount_usd` | no | Monthly budget ceiling in USD (default `1`) |
 
 ### Outputs
 
@@ -184,7 +190,8 @@ It is generated, not committed.
 
 ## CI/CD pipeline
 
-`.github/workflows/deploy.yml` runs on every push and pull request to `main`/`master`.
+`.github/workflows/deploy.yml` and `.github/workflows/security.yml` run on every
+push and pull request to `main`/`master`.
 
 **Job 1 — Terraform validate & security scan** (all events)
 
@@ -193,7 +200,31 @@ It is generated, not committed.
 3. `terraform validate`
 4. Checkov Terraform scan (`soft_fail: true`, findings are reported but do not block)
 
-**Job 2 — Build & deploy frontend & Go API** (push to `main`/`master` only)
+**Job 2 — Terraform security & Always Free guard** (`security.yml`, all events)
+
+1. **Trivy** `config` scan of the Terraform root (successor of tfsec, which
+   received its last rule updates before being merged into Trivy); fails on
+   `HIGH`/`CRITICAL`.
+2. **KICS** Terraform scan as an independent second engine (Terrascan was
+   archived in November 2025); fails on high/critical findings.
+3. **Conftest/OPA** evaluates `policies/oci_free_tier.rego` against the HCL
+   files directly (`--combine --parser hcl2`, no OCI credentials needed):
+   paid shapes, more than 2 × `E2.1.Micro`, more than 4 OCPU / 24 GB total on
+   A1.Flex, more than 200 GB of block storage, and a bastion open to the
+   internet all fail the job. Infracost cannot price OCI resources, so this
+   policy gate is what protects the free tier — together with the
+   `oci_budget_budget` alert defined in `budget.tf`.
+4. A self-test runs the same policy against `policies/testdata/bad/` and fails
+   the job if the violations there are not reported, so the gate cannot
+   silently degrade into a no-op.
+
+Run the free-tier gate locally before pushing:
+
+```bash
+conftest test --combine --parser hcl2 --policy policies $(find . -maxdepth 1 -name '*.tf')
+```
+
+**Job 3 — Build & deploy frontend & Go API** (push to `main`/`master` only)
 
 1. Checkout, Node.js 20 with npm cache (`frontend/package-lock.json`)
 2. `npm ci && npm run build` in `frontend/`
@@ -250,7 +281,10 @@ gh variable get REMOTE_HOST   # verify
 - The instance is protected against accidental destroy/recreate.
 - The pipeline receives only a deploy key, not OCI API credentials, so a compromised
   workflow cannot modify infrastructure.
-- Checkov runs on every change; its output should be reviewed even when `soft_fail` is on.
+- Checkov runs on every change (`soft_fail: true`); Trivy, KICS and the OPA
+  free-tier gate run as hard gates in the Layer 3 job.
+- Dependabot keeps GitHub Actions, npm and Go modules patched (supply-chain
+  integrity for the pipeline itself).
 
 See [`docs/security-remediation.md`](docs/security-remediation.md) for the audit
 findings, live-tenant runbook and verification commands.

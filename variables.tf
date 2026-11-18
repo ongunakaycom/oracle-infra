@@ -52,6 +52,18 @@ variable "ssh_public_key" {
   default     = ""
 }
 
+variable "budget_alert_emails" {
+  description = "OCI Butce alarmlarini alacak e-posta adresleri. Bos liste butce alarmini devre disi birakir."
+  type        = list(string)
+  default     = []
+}
+
+variable "budget_amount_usd" {
+  description = "Always Free denetimi icin aylik butce tavani (USD). 1 USD + %1 esik = herhangi bir ucretlendirmede alarm."
+  type        = number
+  default     = 1
+}
+
 variable "bastion_allowed_cidrs" {
   description = "OCI Bastion servisine bağlanmasına izin verilen CIDR blokları (Kendi IP adresinizle sınırlayın)"
   type        = list(string)

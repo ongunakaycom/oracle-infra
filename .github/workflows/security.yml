@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   security-audit:
-    name: Layer 1 & Layer 2 Security Audit (Secrets, Deps, IaC, ShellCheck)
+    name: Layer 1 & Layer 2 Security Audit (Secrets, Deps, ShellCheck)
     runs-on: ubuntu-latest
 
     steps:
@@ -72,18 +72,71 @@ jobs:
             echo "SNYK_TOKEN tanımlı değil; Snyk adımı atlandı (npm audit & govulncheck aktif)."
           fi
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: "1.10.0"
-
-      - name: Run tfsec Security Scanner
-        uses: aquasecurity/tfsec-action@master
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          soft_fail: false
-
       - name: ShellCheck & Bash Syntax Audit (DR Scripts)
         run: |
           bash -n scripts/*.sh
           shellcheck scripts/*.sh
+
+  terraform-security:
+    name: Layer 3 - IaC Security & Always Free Guard
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # Trivy, tfsec'in halefidir: ayni kural motoru artik yalnizca Trivy
+      # uzerinden guncelleniyor. Terraform koku repository kokunde oldugu icin
+      # scan-ref '.' olarak verilir, gurultu yapan dizinler atlanir.
+      - name: Run Trivy IaC Scan (tfsec successor)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: 'config'
+          scan-ref: '.'
+          severity: 'HIGH,CRITICAL'
+          exit-code: '1'
+          skip-dirs: '.terraform,frontend/node_modules,frontend/dist,backend,policies/testdata'
+
+      # Bagimsiz ikinci motor: Trivy'nin kacirdigi konfigurasyonlari yakalar.
+      - name: Run KICS IaC Scan (independent cross-check)
+        uses: checkmarx/kics-github-action@v2.2.1
+        with:
+          path: '.'
+          platform_type: 'Terraform'
+          fail_on: 'high,critical'
+          exclude_paths: '**/.terraform/**,**/node_modules/**,**/dist/**,**/policies/testdata/**'
+
+      # OCI Always Free sinirlari Trivy/KICS kurallarinda yer almaz; bu yuzden
+      # planlanan kaynaklari OPA/Rego ile ayrica dogruluyoruz. Conftest HCL'i
+      # dogrudan ayristirdigi icin OCI kimlik bilgisi veya plan ciktisi gerekmez.
+      - name: Install Conftest (OPA)
+        env:
+          CONFTEST_VERSION: '0.71.1'
+        run: |
+          curl -sSfL -o conftest.tar.gz \
+            "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz"
+          tar -xzf conftest.tar.gz conftest
+          sudo install -m 0755 conftest /usr/local/bin/conftest
+          conftest --version
+
+      - name: Enforce OCI Always Free Policy Gate (OPA/Rego)
+        run: |
+          conftest test --combine --parser hcl2 --policy policies \
+            $(find . -maxdepth 1 -name '*.tf' -print)
+
+      # Politika sessizce "her seyi gecti" durumuna dusmesin diye negatif
+      # fixture uzerinde FAIL uretmesi zorunlu tutulur.
+      - name: Self-test Always Free Policy Gate (must detect violations)
+        run: |
+          set +e
+          output=$(conftest test --combine --parser hcl2 --policy policies policies/testdata/bad 2>&1)
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          if [ "$status" -eq 0 ] || ! printf '%s\n' "$output" | grep -q '^FAIL'; then
+            echo "::error::Always Free policy self-test failed: fixture violations in policies/testdata/bad were not reported."
+            exit 1
+          fi
+          echo "Policy self-test passed: fixture violations were rejected."
