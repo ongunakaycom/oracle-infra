@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   security-audit:
-    name: Layer 1 & IaC Security Audit (Gitleaks, TruffleHog, tfsec, ShellCheck)
+    name: Layer 1 & Layer 2 Security Audit (Secrets, Deps, IaC, ShellCheck)
     runs-on: ubuntu-latest
 
     steps:
@@ -20,6 +20,7 @@ jobs:
         with:
           fetch-depth: 0
 
+      # --- LAYER 1: Source Code & Secret Security ---
       - name: Run Gitleaks Secret Scanner (Layer 1 - Primary)
         uses: gitleaks/gitleaks-action@v2
         env:
@@ -30,13 +31,41 @@ jobs:
         with:
           extra_args: --only-verified
 
-      - name: Frontend ESLint Security & Quality Check
+      - name: Frontend ESLint Security & Quality Check (Layer 1)
         if: hashFiles('frontend/package.json') != ''
         working-directory: frontend
         run: |
           npm ci --silent
           npm run lint --if-present
 
+      # --- LAYER 2: Controlled Dependency Security (No Bot Noise) ---
+      - name: Frontend npm Audit (Layer 2 - High/Critical CVEs)
+        if: hashFiles('frontend/package-lock.json') != ''
+        working-directory: frontend
+        run: npm audit --audit-level=high
+
+      - name: Setup Go for Vulnerability Audit
+        if: hashFiles('backend/go.mod') != ''
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+
+      - name: Backend Go Vulnerability Check (Layer 2 - govulncheck)
+        if: hashFiles('backend/go.mod') != ''
+        working-directory: backend
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      - name: Snyk Deep Dependency & Zero-Day Scan (Layer 2 - Optional Token)
+        if: ${{ secrets.SNYK_TOKEN != '' && hashFiles('frontend/package.json') != '' }}
+        uses: snyk/actions/node@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --file=frontend/package.json --severity-threshold=high
+
+      # --- IaC & DR Script Security ---
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
@@ -49,6 +78,7 @@ jobs:
           soft_fail: false
 
       - name: ShellCheck & Bash Syntax Audit (DR Scripts)
+        if: hashFiles('scripts/*.sh') != ''
         run: |
           bash -n scripts/*.sh
           shellcheck scripts/*.sh
