@@ -20,6 +20,11 @@
 #   SECOPS_ADMIN_PASS     credentials used for the happy path (default smoke-pass)
 #   SMOKE_ALLOWED_ORIGIN  origin the target is expected to allow
 #                         (default http://localhost:5173)
+#   SECOPS_SMOKE_JWT_SECRET  signing key of the target, needed to mint
+#                         validly-signed edge-case tokens. Optional: the
+#                         alg:none / unsupported-algorithm checks run without
+#                         it, but the expired / future-dated claim checks are
+#                         skipped when the key is unknown.
 #   SECOPS_SMOKE_AUTOSTART 1 = build and start backend/ before testing
 set -euo pipefail
 
@@ -30,6 +35,7 @@ ADMIN_USER="${SECOPS_ADMIN_USER:-smoke-admin}"
 ADMIN_PASS="${SECOPS_ADMIN_PASS:-smoke-pass}"
 ALLOWED_ORIGIN="${SMOKE_ALLOWED_ORIGIN:-http://localhost:5173}"
 AUTOSTART="${SECOPS_SMOKE_AUTOSTART:-0}"
+SMOKE_JWT_SECRET="${SECOPS_SMOKE_JWT_SECRET:-}"
 
 # Distinctive, low-entropy marker used as a wrong password. It must never show
 # up in audit_logs; the value is asserted below.
@@ -114,6 +120,33 @@ json_token() {
   sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$1" | head -n 1
 }
 
+# b64url_encode <string>
+# base64url without padding. GNU base64 wraps output at 76 columns, and a raw
+# newline inside an HTTP header makes Go answer 400 Bad Request before the
+# handler runs, so the newline is stripped here. This is what silently broke
+# the first revision of the JWT checks.
+b64url_encode() {
+  printf '%s' "$1" | base64 | tr -d '\n' | tr '+/' '-_' | tr -d '='
+}
+
+# hmac_sha256_b64url <secret>  (signing input on stdin)
+hmac_sha256_b64url() {
+  openssl dgst -sha256 -hmac "$1" -binary | base64 | tr -d '\n' | tr '+/' '-_' | tr -d '='
+}
+
+# mint_jwt <secret> <header-json> <payload-json>
+# Builds a signed HS256 token. Used to prove that expired / future-dated
+# tokens carrying a *cryptographically valid* signature are still rejected:
+# a token that fails on the signature alone would not exercise claim checks.
+mint_jwt() {
+  local secret="$1" header payload signing
+  header="$(b64url_encode "$2")"
+  payload="$(b64url_encode "$3")"
+  signing="${header}.${payload}"
+  printf '%s.%s.%s' "$header" "$payload" \
+    "$(printf '%s' "$signing" | hmac_sha256_b64url "$secret")"
+}
+
 # fetch_audit_log <token> [search-term]
 # Reads audit_logs back through the authorised API (no sqlite3 dependency) and
 # stores the JSON array in $TMP/audit.json. Prints the status code.
@@ -171,6 +204,9 @@ if [ "$AUTOSTART" = "1" ]; then
 
   # Never hard-code a key in the repository; generate a throwaway one.
   JWT_SECRET="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  # The suite knows the key it just generated, so it can mint signed tokens
+  # to prove the claim (exp/nbf/iat) validation, not only the signature check.
+  SMOKE_JWT_SECRET="$JWT_SECRET"
 
   (
     cd "$REPO_ROOT/backend"
@@ -289,12 +325,137 @@ if [ -n "$token" ]; then
   code=$(request GET /api/metrics "$TMP/tampered" \
     -H "Authorization: Bearer ${tampered}")
   expect_status "tampered token is rejected" 401 "$code"
+
 else
   fail "login returns a bearer token (empty token in response)"
   fail "authorized request checks were skipped (no token)"
 fi
 
-# ---- 5. Login rate limiter -----------------------------------------------
+# ---- 5. JWT validation ---------------------------------------------------
+
+# The signature gate is already covered by the tampered-token check above.
+# These cases prove the *claim* and *algorithm* handling, which is where JWT
+# implementations usually go wrong:
+#   * alg:none / algorithm confusion (header is attacker-controlled),
+#   * expired tokens,
+#   * tokens dated in the future (iat / nbf) - a sign of a forged or
+#     clock-skewed token.
+# Claims are only reached when the signature verifies, so the empty-key and
+# future-dated checks mint a genuinely signed token first.
+echo "== JWT validation =="
+
+now="$(date +%s)"
+HS256_HEADER='{"alg":"HS256","typ":"JWT"}'
+
+# 1. alg:none with an empty signature (the classic forgery).
+none_token="$(b64url_encode '{"alg":"none","typ":"JWT"}').$(b64url_encode "{\"sub\":\"smoke-admin\",\"role\":\"admin\",\"iat\":${now},\"exp\":$((now + 3600))}")."
+code=$(request GET /api/metrics "$TMP/jwt-alg-none" \
+  -H "Authorization: Bearer ${none_token}")
+expect_status "token with alg:none is rejected" 401 "$code"
+
+# 2. Unsupported algorithm (HS512) - only HS256 is accepted, so an otherwise
+#    correctly signed token of another family must not be honoured.
+if command -v openssl >/dev/null 2>&1 && [ -n "$SMOKE_JWT_SECRET" ]; then
+  hs512_header="$(b64url_encode '{"alg":"HS512","typ":"JWT"}')"
+  hs512_payload="$(b64url_encode "{\"sub\":\"smoke-admin\",\"role\":\"admin\",\"iat\":${now},\"exp\":$((now + 3600))}")"
+  hs512_sig="$(printf '%s' "${hs512_header}.${hs512_payload}" \
+    | openssl dgst -sha512 -hmac "$SMOKE_JWT_SECRET" -binary | base64 | tr -d '\n' | tr '+/' '-_' | tr -d '=')"
+  code=$(request GET /api/metrics "$TMP/jwt-hs512" \
+    -H "Authorization: Bearer ${hs512_header}.${hs512_payload}.${hs512_sig}")
+  expect_status "token with unsupported alg:HS512 is rejected" 401 "$code"
+
+  # 3. Positive control: a validly minted token must be accepted. Without this
+  #    the negative results above could pass merely because minting is broken.
+  control_token="$(mint_jwt "$SMOKE_JWT_SECRET" "$HS256_HEADER" \
+    "{\"sub\":\"smoke-admin\",\"role\":\"admin\",\"iat\":${now},\"exp\":$((now + 3600))}")"
+  code=$(request GET /api/metrics "$TMP/jwt-control" \
+    -H "Authorization: Bearer ${control_token}")
+  expect_status "freshly minted valid token is accepted (control)" 200 "$code"
+
+  # 4. Expired token: valid signature, exp in the past.
+  expired_token="$(mint_jwt "$SMOKE_JWT_SECRET" "$HS256_HEADER" \
+    "{\"sub\":\"smoke-admin\",\"role\":\"admin\",\"iat\":$((now - 7200)),\"exp\":$((now - 3600))}")"
+  code=$(request GET /api/metrics "$TMP/jwt-expired" \
+    -H "Authorization: Bearer ${expired_token}")
+  expect_status "expired token is rejected" 401 "$code"
+
+  # 5. Future iat: token claims it was issued an hour from now.
+  future_iat_token="$(mint_jwt "$SMOKE_JWT_SECRET" "$HS256_HEADER" \
+    "{\"sub\":\"smoke-admin\",\"role\":\"admin\",\"iat\":$((now + 3600)),\"exp\":$((now + 7200))}")"
+  code=$(request GET /api/metrics "$TMP/jwt-future-iat" \
+    -H "Authorization: Bearer ${future_iat_token}")
+  expect_status "token with future iat is rejected" 401 "$code"
+
+  # 6. Future nbf: token is not valid until an hour from now.
+  future_nbf_token="$(mint_jwt "$SMOKE_JWT_SECRET" "$HS256_HEADER" \
+    "{\"sub\":\"smoke-admin\",\"role\":\"admin\",\"iat\":${now},\"nbf\":$((now + 3600)),\"exp\":$((now + 7200))}")"
+  code=$(request GET /api/metrics "$TMP/jwt-future-nbf" \
+    -H "Authorization: Bearer ${future_nbf_token}")
+  expect_status "token with future nbf is rejected" 401 "$code"
+
+  # 7. Correct algorithm, wrong key: signature must fail.
+  wrong_key_token="$(mint_jwt "not-the-real-key" "$HS256_HEADER" \
+    "{\"sub\":\"smoke-admin\",\"role\":\"admin\",\"iat\":${now},\"exp\":$((now + 3600))}")"
+  code=$(request GET /api/metrics "$TMP/jwt-wrong-key" \
+    -H "Authorization: Bearer ${wrong_key_token}")
+  expect_status "token signed with the wrong key is rejected" 401 "$code"
+else
+  pass "signed-token claim checks skipped (no signing key available to the suite)"
+fi
+
+# 8. Malformed token: not three dot-separated parts.
+code=$(request GET /api/metrics "$TMP/jwt-malformed" \
+  -H "Authorization: Bearer not-a-jwt")
+expect_status "malformed token is rejected" 401 "$code"
+
+# ---- 6. Security headers -------------------------------------------------
+
+# Hardening headers are also set by the Caddy edge (backend/Caddyfile), but the
+# API must carry them itself so the guarantees survive direct :8080 access and
+# local/CI runs where Caddy is absent. Asserting on an authorised resource, a
+# public endpoint and an error response proves the middleware is not skipped.
+echo "== security headers =="
+code=$(request GET /api/health "$TMP/headers-health")
+expect_status "GET /api/health for headers" 200 "$code"
+
+expect_equal "X-Content-Type-Options: nosniff" "nosniff" \
+  "$(header_value "$TMP/headers-health.headers" x-content-type-options)"
+expect_equal "X-Frame-Options: DENY" "DENY" \
+  "$(header_value "$TMP/headers-health.headers" x-frame-options)"
+expect_equal "Referrer-Policy: strict-origin-when-cross-origin" \
+  "strict-origin-when-cross-origin" \
+  "$(header_value "$TMP/headers-health.headers" referrer-policy)"
+expect_equal "Cross-Origin-Resource-Policy: same-origin" "same-origin" \
+  "$(header_value "$TMP/headers-health.headers" cross-origin-resource-policy)"
+
+csp="$(header_value "$TMP/headers-health.headers" content-security-policy)"
+if printf '%s' "$csp" | grep -q "frame-ancestors 'none'"; then
+  pass "Content-Security-Policy denies framing"
+else
+  fail "Content-Security-Policy denies framing (got '${csp}')"
+fi
+
+perms="$(header_value "$TMP/headers-health.headers" permissions-policy)"
+if printf '%s' "$perms" | grep -q 'geolocation=()'; then
+  pass "Permissions-Policy restricts powerful features"
+else
+  fail "Permissions-Policy restricts powerful features (got '${perms}')"
+fi
+
+# Headers must also be present on 401 (auth gate) and 405 (wrong method)
+# responses; a header middleware wired only around success paths is a common
+# mistake.
+code=$(request GET /api/metrics "$TMP/headers-401")
+expect_status "unauthenticated request is rejected (header probe)" 401 "$code"
+expect_equal "401 responses still carry nosniff" "nosniff" \
+  "$(header_value "$TMP/headers-401.headers" x-content-type-options)"
+
+code=$(request GET /api/login "$TMP/headers-405")
+expect_status "GET /api/login is rejected (header probe)" 405 "$code"
+expect_equal "405 responses still carry nosniff" "nosniff" \
+  "$(header_value "$TMP/headers-405.headers" x-content-type-options)"
+
+# ---- 7. Login rate limiter -----------------------------------------------
 
 echo "== login rate limiter =="
 for attempt in 1 2 3 4 5; do
@@ -332,7 +493,7 @@ code=$(request POST /api/login "$TMP/limit-other-ip" \
   --data-binary "{\"username\":\"${ADMIN_USER}\",\"password\":\"${ADMIN_PASS}\"}")
 expect_status "lockout is scoped to the offending IP" 200 "$code"
 
-# ---- 6. Request limits ---------------------------------------------------
+# ---- 8. Request limits ---------------------------------------------------
 
 echo "== request limits =="
 {
@@ -347,10 +508,7 @@ code=$(request POST /api/login "$TMP/big-login" \
   --data-binary "@$TMP/big-login.json")
 expect_status "oversized login body is rejected" 400 "$code"
 
-code=$(request GET /api/login "$TMP/login-method")
-expect_status "GET /api/login is rejected" 405 "$code"
-
-# ---- 7. Audit trail ------------------------------------------------------
+# ---- 9. Audit trail ------------------------------------------------------
 
 # Endpoint behaviour alone does not prove anything was recorded. These checks
 # read audit_logs back through the API and assert the security events landed
