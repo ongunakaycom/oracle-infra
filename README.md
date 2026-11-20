@@ -179,6 +179,23 @@ conftest test --combine --parser hcl2 --policy policies $(find . -maxdepth 1 -na
 trivy config --severity HIGH,CRITICAL --exit-code 1 .
 ```
 
+The API's runtime behaviour is covered by `scripts/security-smoke.sh`. It
+refuses non-loopback targets by design, so it can never fuzz production:
+
+```bash
+# build backend/, start it on 127.0.0.1:8080 with a throwaway key, then test
+SECOPS_SMOKE_AUTOSTART=1 bash scripts/security-smoke.sh
+
+# or point it at an already running local instance
+BASE_URL=http://127.0.0.1:8080 bash scripts/security-smoke.sh
+```
+
+It verifies the security headers/CORS allowlist, unauthenticated and
+tampered-token rejection, login, `/api/records` validation, the 5-failed-attempt
+lockout with `Retry-After`, per-IP lockout isolation and the 4 KB/8 KB body
+limits. The same suite runs as the `backend-smoke` job in `security.yml`;
+production is only ever health-checked and TLS-scanned read-only.
+
 ### Required variables
 
 | Variable | Required | Description |
@@ -230,7 +247,7 @@ bundle; it is never committed.
 Two workflows run on every push and pull request to `main`/`master`; the deploy
 job itself only runs on pushes.
 
-### `security.yml` — Layers 1–3
+### `security.yml` — Layers 1–3 and runtime smoke
 
 **`security-audit` (Layer 1 & 2)**
 
@@ -259,6 +276,14 @@ job itself only runs on pushes.
 4. A self-test runs the same policy against `policies/testdata/bad/` and fails
    the job if the violations there are not reported (Conftest colours its
    output, hence `--no-color`), so the gate cannot silently become a no-op.
+
+**`backend-smoke` (runtime)**
+
+1. Builds `backend/` with Go 1.26.11 and starts it on `127.0.0.1:8080` using a
+   randomly generated JWT key and a temporary SQLite file.
+2. Runs `scripts/security-smoke.sh`, which rejects any non-loopback target, so
+   the negative traffic (failed logins, oversized bodies) never reaches the
+   production Always Free instance.
 
 Run the free-tier gate locally before pushing:
 
@@ -366,8 +391,9 @@ gh variable get REMOTE_HOST   # verify
 - Security headers (HSTS, CSP, Permissions-Policy, `X-Frame-Options: DENY`,
   `nosniff`, COOP/CORP) are defined in `backend/Caddyfile` and applied by the
   deployed edge proxy.
-- `/api/login` throttles failed attempts per client IP (5 per 15 minutes,
-  `429` + `Retry-After`) and compares credential digests in constant time.
+- `/api/login` throttles failed attempts per client IP (5 per 60-second
+  window, `429` + `Retry-After`) and compares credential digests in constant
+  time.
 - The instance is protected against accidental destroy/recreate.
 - The pipeline receives a deploy key and a short-lived OIDC token, but no OCI API
   credentials, so a compromised workflow cannot modify infrastructure.

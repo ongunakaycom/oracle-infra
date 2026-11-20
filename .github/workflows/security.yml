@@ -77,6 +77,29 @@ jobs:
           bash -n scripts/*.sh
           shellcheck scripts/*.sh
 
+  backend-smoke:
+    name: Runtime - Backend Security Smoke (local API)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.11'
+          cache-dependency-path: '**/go.sum'
+
+      # Sadece lokal (loopback) ornek test edilir: rate limit, CORS ve govde
+      # limitleri negatif trafik gerektirir; production'a gonderilmez.
+      - name: Run Backend Security Smoke Suite
+        env:
+          SECOPS_SMOKE_AUTOSTART: '1'
+        run: bash scripts/security-smoke.sh
+
   terraform-security:
     name: Layer 3 - IaC Security & Always Free Guard
     runs-on: ubuntu-latest

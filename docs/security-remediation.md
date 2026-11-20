@@ -130,7 +130,7 @@ curl -sI https://oracle-infra.duckdns.org | grep -Ei 'content-security-policy|pe
 
 `backend/main.go` now throttles `/api/login` per client IP:
 
-- 5 failed attempts within 15 minutes → `429 Too Many Requests` with a
+- 5 failed attempts within a 60-second window → `429 Too Many Requests` with a
   `Retry-After` header until the window expires.
 - A successful login clears that IP's counter.
 - Malformed bodies count as failures.
@@ -161,7 +161,14 @@ Tests:
 ```bash
 cd backend
 go test ./...
+
+# End-to-end runtime checks against a local instance (never production)
+cd ..
+SECOPS_SMOKE_AUTOSTART=1 bash scripts/security-smoke.sh
 ```
 
-The tests cover the limiter window/lockout, the trusted-proxy logic, the `429`
-response, and the request-body limit.
+The unit tests cover the limiter window/lockout, the trusted-proxy logic, the
+`429` response, and the request-body limit. The smoke suite re-verifies the same
+behaviour over HTTP (CORS allowlist, unauthenticated and tampered-token
+rejection, oversized bodies, per-IP lockout isolation) and runs as the
+`backend-smoke` job in `security.yml`.
