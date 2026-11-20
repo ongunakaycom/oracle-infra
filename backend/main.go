@@ -57,10 +57,17 @@ type tokenClaims struct {
 	Sub  string `json:"sub"`
 	Role string `json:"role"`
 	Iat  int64  `json:"iat"`
+	Nbf  int64  `json:"nbf,omitempty"`
 	Exp  int64  `json:"exp"`
 }
 
 const tokenTTL = 8 * time.Hour
+
+// tokenClockSkew tolerates small clock differences between the signer and the
+// verifier when checking iat/nbf. It is deliberately short: an operator token
+// lives for hours, so there is no legitimate reason to accept one that claims
+// to have been issued well into the future.
+const tokenClockSkew = 30 * time.Second
 
 var (
 	db *sql.DB
@@ -189,6 +196,32 @@ func enableCORS(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// ---- Security headers ------------------------------------------------------
+
+// securityHeaders sets the hardening headers on every response.
+//
+// The Caddy reverse proxy in backend/Caddyfile already applies these headers
+// for proxied traffic, but the Go API is also reachable directly on :8080 and
+// in local/CI runs it is the only component in the path. Setting them here
+// means the guarantees hold for every route regardless of who terminates TLS.
+//
+// HSTS is intentionally absent: it is only meaningful over HTTPS and is
+// already emitted by Caddy, which owns the TLS termination.
+func securityHeaders(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		h.Set("X-XSS-Protection", "0")
+		h.Set("Cross-Origin-Opener-Policy", "same-origin")
+		h.Set("Cross-Origin-Resource-Policy", "same-origin")
+		h.Set("Permissions-Policy", "accelerometer=(), camera=(), geolocation=(), gyroscope=(), microphone=(), payment=(), usb=(), interest-cohort=()")
+		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
+		next(w, r)
+	}
+}
+
 // ---- JWT (HS256) -----------------------------------------------------------
 
 func base64URL(data []byte) string {
@@ -202,6 +235,7 @@ func signToken(subject, role string) (string, error) {
 		Sub:  subject,
 		Role: role,
 		Iat:  now.Unix(),
+		Nbf:  now.Unix(),
 		Exp:  now.Add(tokenTTL).Unix(),
 	})
 	if err != nil {
@@ -222,14 +256,9 @@ func verifyToken(token string) (tokenClaims, error) {
 		return claims, errors.New("malformed token")
 	}
 
-	signingInput := parts[0] + "." + parts[1]
-	mac := hmac.New(sha256.New, jwtSecret)
-	mac.Write([]byte(signingInput))
-	expected := base64URL(mac.Sum(nil))
-	if subtle.ConstantTimeCompare([]byte(expected), []byte(parts[2])) != 1 {
-		return claims, errors.New("invalid signature")
-	}
-
+	// Pin the algorithm before anything else. Reading `alg` from the token and
+	// trusting it is the root cause of the classic algorithm-confusion attacks
+	// ("alg":"none", RS256 -> HS256). Only HS256 is ever accepted.
 	headerJSON, err := base64.RawURLEncoding.DecodeString(parts[0])
 	if err != nil {
 		return claims, errors.New("malformed header")
@@ -241,6 +270,14 @@ func verifyToken(token string) (tokenClaims, error) {
 		return claims, errors.New("unsupported algorithm")
 	}
 
+	signingInput := parts[0] + "." + parts[1]
+	mac := hmac.New(sha256.New, jwtSecret)
+	mac.Write([]byte(signingInput))
+	expected := base64URL(mac.Sum(nil))
+	if subtle.ConstantTimeCompare([]byte(expected), []byte(parts[2])) != 1 {
+		return claims, errors.New("invalid signature")
+	}
+
 	payloadJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
 		return claims, errors.New("malformed payload")
@@ -248,8 +285,17 @@ func verifyToken(token string) (tokenClaims, error) {
 	if err := json.Unmarshal(payloadJSON, &claims); err != nil {
 		return claims, errors.New("invalid claims")
 	}
-	if claims.Exp <= time.Now().Unix() {
+
+	now := time.Now().Unix()
+	skew := int64(tokenClockSkew.Seconds())
+	if claims.Exp <= now {
 		return claims, errors.New("token expired")
+	}
+	if claims.Nbf > now+skew {
+		return claims, errors.New("token not yet valid")
+	}
+	if claims.Iat > now+skew {
+		return claims, errors.New("token issued in the future")
 	}
 	return claims, nil
 }
@@ -665,10 +711,10 @@ func main() {
 	insertAudit("secops-api", "INFO", "SecOps API service started")
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/health", enableCORS(handleHealth))
-	mux.HandleFunc("/api/metrics", enableCORS(requireAuth(handleMetrics)))
-	mux.HandleFunc("/api/login", enableCORS(handleLogin))
-	mux.HandleFunc("/api/records", enableCORS(requireAuth(handleRecords)))
+	mux.HandleFunc("/api/health", securityHeaders(enableCORS(handleHealth)))
+	mux.HandleFunc("/api/metrics", securityHeaders(enableCORS(requireAuth(handleMetrics))))
+	mux.HandleFunc("/api/login", securityHeaders(enableCORS(handleLogin)))
+	mux.HandleFunc("/api/records", securityHeaders(enableCORS(requireAuth(handleRecords))))
 
 	port := ":8080"
 	log.Printf("SecOps API server starting on %s", port)
