@@ -31,8 +31,14 @@ ADMIN_PASS="${SECOPS_ADMIN_PASS:-smoke-pass}"
 ALLOWED_ORIGIN="${SMOKE_ALLOWED_ORIGIN:-http://localhost:5173}"
 AUTOSTART="${SECOPS_SMOKE_AUTOSTART:-0}"
 
+# Distinctive, low-entropy marker used as a wrong password. It must never show
+# up in audit_logs; the value is asserted below.
+WRONG_PASS="smoke-wrong-password"
+
 TMP="$(mktemp -d)"
 SERVER_PID=""
+TOKEN=""
+HAS_TOKEN=0
 CHECKS=0
 FAILURES=0
 
@@ -106,6 +112,30 @@ header_value() {
 # json_token <body-file>
 json_token() {
   sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$1" | head -n 1
+}
+
+# fetch_audit_log <token> [search-term]
+# Reads audit_logs back through the authorised API (no sqlite3 dependency) and
+# stores the JSON array in $TMP/audit.json. Prints the status code.
+fetch_audit_log() {
+  curl -sS --max-time 10 -o "$TMP/audit.json" -w '%{http_code}' -G \
+    --data-urlencode "q=${2:-}" "${BASE_URL}/api/records" \
+    -H "Authorization: Bearer $1"
+}
+
+# audit_kv_count <service-substring> <severity-substring> <message-substring>
+# Counts records in the last fetched page that carry all three strings.
+audit_kv_count() {
+  tr '}' '\n' <"$TMP/audit.json" |
+    grep -F "\"service\":\"$1\"" |
+    grep -F "\"severity\":\"$2\"" |
+    grep -cF "$3" || true
+}
+
+# audit_note_count <substring>
+# Counts records in the last fetched page that carry the given string at all.
+audit_note_count() {
+  tr '}' '\n' <"$TMP/audit.json" | grep -cF "$1" || true
 }
 
 # ---- Target guard ----------------------------------------------------------
@@ -220,6 +250,8 @@ expect_status "POST /api/login with valid credentials" 200 "$code"
 
 token="$(json_token "$TMP/login-ok.body")"
 if [ -n "$token" ]; then
+  TOKEN="$token"
+  HAS_TOKEN=1
   pass "login returns a bearer token"
 
   code=$(request GET /api/metrics "$TMP/metrics" \
@@ -269,14 +301,14 @@ for attempt in 1 2 3 4 5; do
   code=$(request POST /api/login "$TMP/limit-${attempt}" \
     -H 'Content-Type: application/json' \
     -H 'X-Forwarded-For: 203.0.113.10' \
-    --data-binary '{"username":"nobody","password":"wrong"}')
+    --data-binary "{\"username\":\"nobody\",\"password\":\"${WRONG_PASS}\"}")
   expect_status "failed login ${attempt}/5" 401 "$code"
 done
 
 code=$(request POST /api/login "$TMP/limit-6" \
   -H 'Content-Type: application/json' \
   -H 'X-Forwarded-For: 203.0.113.10' \
-  --data-binary '{"username":"nobody","password":"wrong"}')
+  --data-binary "{\"username\":\"nobody\",\"password\":\"${WRONG_PASS}\"}")
 expect_status "6th failed login is throttled" 429 "$code"
 
 retry_after="$(header_value "$TMP/limit-6.headers" retry-after)"
@@ -317,6 +349,55 @@ expect_status "oversized login body is rejected" 400 "$code"
 
 code=$(request GET /api/login "$TMP/login-method")
 expect_status "GET /api/login is rejected" 405 "$code"
+
+# ---- 7. Audit trail ------------------------------------------------------
+
+# Endpoint behaviour alone does not prove anything was recorded. These checks
+# read audit_logs back through the API and assert the security events landed
+# there exactly once, with the real client IP and without credential leakage.
+echo "== audit trail =="
+if [ "$HAS_TOKEN" -ne 1 ]; then
+  fail "audit trail assertions skipped (no admin token)"
+else
+  status=$(fetch_audit_log "$TOKEN")
+  expect_status "GET /api/records reads the audit trail" 200 "$status"
+
+  expect_equal "successful login is audited once (INFO, real client IP)" "1" \
+    "$(audit_kv_count auth-gateway INFO 'Operator login succeeded from 203.0.113.20')"
+
+  expect_equal "the failing IP has no success record" "0" \
+    "$(audit_kv_count auth-gateway INFO '203.0.113.10')"
+
+  expect_equal "lockout is audited exactly once (WARN)" "1" \
+    "$(audit_kv_count auth-gateway WARN 'Login rate limit engaged for 203.0.113.10 after 5 failed attempts')"
+
+  expect_equal "individual failed logins do not flood audit_logs" "0" \
+    "$(audit_kv_count auth-gateway WARN '203.0.113.11')"
+
+  expect_equal "one oversized body stays below the audit threshold" "0" \
+    "$(audit_kv_count auth-gateway WARN '203.0.113.30')"
+
+  expect_equal "submitted passwords never reach audit_logs" "0" \
+    "$(audit_note_count "$WRONG_PASS")"
+
+  if [ "${#ADMIN_PASS}" -ge 6 ]; then
+    expect_equal "the configured admin password never reaches audit_logs" "0" \
+      "$(audit_note_count "$ADMIN_PASS")"
+  else
+    pass "admin password leak check skipped (password shorter than 6 characters)"
+  fi
+
+  # Throttled retries must not append a new WARN row per request.
+  code=$(request POST /api/login "$TMP/limit-7" \
+    -H 'Content-Type: application/json' \
+    -H 'X-Forwarded-For: 203.0.113.10' \
+    --data-binary "{\"username\":\"nobody\",\"password\":\"${WRONG_PASS}\"}")
+  expect_status "7th failed login stays throttled" 429 "$code"
+
+  fetch_audit_log "$TOKEN" >/dev/null
+  expect_equal "throttled retries do not duplicate the WARN row" "1" \
+    "$(audit_kv_count auth-gateway WARN 'Login rate limit engaged for 203.0.113.10')"
+fi
 
 # ---- Summary -------------------------------------------------------------
 

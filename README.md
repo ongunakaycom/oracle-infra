@@ -193,8 +193,11 @@ BASE_URL=http://127.0.0.1:8080 bash scripts/security-smoke.sh
 It verifies the security headers/CORS allowlist, unauthenticated and
 tampered-token rejection, login, `/api/records` validation, the 5-failed-attempt
 lockout with `Retry-After`, per-IP lockout isolation and the 4 KB/8 KB body
-limits. The same suite runs as the `backend-smoke` job in `security.yml`;
-production is only ever health-checked and TLS-scanned read-only.
+limits. It then reads `audit_logs` back and asserts the successful login and the
+lockout were recorded exactly once (with the real client IP and no per-retry
+duplication), and that no submitted password ever reaches the audit trail. The
+same suite runs as the `backend-smoke` job in `security.yml`; production is only
+ever health-checked and TLS-scanned read-only.
 
 ### Required variables
 

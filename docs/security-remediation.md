@@ -172,3 +172,8 @@ The unit tests cover the limiter window/lockout, the trusted-proxy logic, the
 behaviour over HTTP (CORS allowlist, unauthenticated and tampered-token
 rejection, oversized bodies, per-IP lockout isolation) and runs as the
 `backend-smoke` job in `security.yml`.
+
+It also asserts the audit trail itself: the successful login and the lockout are
+present exactly once with the real client IP, throttled retries do not duplicate
+the `WARN` row, and neither the submitted nor the configured password appears in
+`audit_logs`.
