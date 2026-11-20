@@ -2,7 +2,7 @@ name: DevSecOps Security Scan & Audit
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: [ "main", "master", "feature/**" ]
   pull_request:
     branches: [ "main", "master" ]
 
